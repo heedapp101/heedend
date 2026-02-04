@@ -19,6 +19,9 @@ import {
   reportPost,
   dontRecommendPost,
   getSimilarPosts,
+  deletePost,
+  archivePost,
+  getMyArchivedPosts,
 } from "../controllers/imagePostController.js";
 import { requireAuth, optionalAuth } from "../middleware/authMiddleware.js";
 import { upload } from "../middleware/upload.js";
@@ -70,6 +73,9 @@ router.get("/", getAllImagePosts);
 /* ---------- GET MY POSTS ---------- */
 router.get("/posts/me", requireAuth, getMyImagePosts);
 
+/* ---------- GET MY ARCHIVED POSTS ---------- */
+router.get("/posts/archived", requireAuth, getMyArchivedPosts);
+
 /* ---------- GET ANY USER'S POSTS (ProfileScreen) ---------- */
 router.get("/user/:userId", getPostsByUser);
 
@@ -85,6 +91,10 @@ router.post("/:postId/like", requireAuth, toggleLikePost);
 /* ---------- REPORT & PREFERENCE ---------- */
 router.post("/:postId/report", requireAuth, reportPost);
 router.post("/:postId/dont-recommend", requireAuth, dontRecommendPost);
+
+/* ---------- DELETE & ARCHIVE POST ---------- */
+router.delete("/:postId", requireAuth, deletePost);
+router.post("/:postId/archive", requireAuth, archivePost);
 
 /* ---------- SELLER STATS ---------- */
 router.get("/seller/stats", requireAuth, getSellerStats);

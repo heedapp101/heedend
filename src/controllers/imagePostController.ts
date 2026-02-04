@@ -252,10 +252,6 @@ export const getSinglePost = async (req: AuthRequest, res: Response) => {
         .populate("user", "username userType name profilePic") as any;
     }
 
-    if (!post) {
-      return res.status(404).json({ message: "Post not found" });
-    }
-
     // 🚀 BUFFERED: Add View Weight (Zero DB latency - batched every 30s)
     if (req.user && post.tags && post.tags.length > 0) {
       interestBuffer.add(req.user._id.toString(), post.tags, INTEREST_WEIGHTS.VIEW);
@@ -361,7 +357,19 @@ export const getMyImagePosts = async (req: AuthRequest, res: Response) => {
   try {
     if (!req.user) return res.status(401).json({ message: "Unauthorized" });
 
-    const posts = await ImagePost.find({ user: req.user._id })
+    // Include archived posts query param (for viewing archived tab)
+    const includeArchived = req.query.includeArchived === 'true';
+    const archivedOnly = req.query.archivedOnly === 'true';
+    
+    let filter: any = { user: req.user._id };
+    
+    if (archivedOnly) {
+      filter.isArchived = true;
+    } else if (!includeArchived) {
+      filter.$or = [{ isArchived: false }, { isArchived: { $exists: false } }];
+    }
+
+    const posts = await ImagePost.find(filter)
       .populate("user", "username userType")
       .sort({ createdAt: -1 });
 
@@ -387,7 +395,11 @@ export const getPostsByUser = async (req: Request, res: Response) => {
       return res.status(400).json({ message: "Invalid user ID" });
     }
 
-    const posts = await ImagePost.find({ user: userId })
+    // Don't show archived posts to other users viewing a profile
+    const posts = await ImagePost.find({ 
+      user: userId,
+      $or: [{ isArchived: false }, { isArchived: { $exists: false } }]
+    })
       .populate("user", "username userType")
       .sort({ createdAt: -1 });
 
@@ -1696,5 +1708,102 @@ export const dontRecommendPost = async (req: AuthRequest, res: Response) => {
   } catch (err) {
     console.error("Don't Recommend Error:", err);
     res.status(500).json({ message: "Failed to update preference" });
+  }
+};
+
+/* =========================
+   DELETE POST
+========================= */
+export const deletePost = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ message: "Unauthorized" });
+
+    const { postId } = req.params;
+    const post = await ImagePost.findById(postId);
+    
+    if (!post) return res.status(404).json({ message: "Post not found" });
+    
+    // Only the owner can delete their post
+    if (post.user.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: "You can only delete your own posts" });
+    }
+
+    // Delete all related data
+    await Promise.all([
+      // Delete comments for this post
+      mongoose.model("Comment").deleteMany({ post: postId }),
+      // Delete reports for this post
+      Report.deleteMany({ post: postId }),
+      // Remove from users' collections
+      mongoose.model("User").updateMany(
+        { "collections.posts": postId },
+        { $pull: { "collections.$[].posts": postId } }
+      ),
+    ]);
+
+    // Delete the post
+    await ImagePost.findByIdAndDelete(postId);
+
+    res.json({ success: true, message: "Post deleted successfully" });
+  } catch (err) {
+    console.error("Delete Post Error:", err);
+    res.status(500).json({ message: "Failed to delete post" });
+  }
+};
+
+/* =========================
+   ARCHIVE / UNARCHIVE POST
+========================= */
+export const archivePost = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ message: "Unauthorized" });
+
+    const { postId } = req.params;
+    const post = await ImagePost.findById(postId);
+    
+    if (!post) return res.status(404).json({ message: "Post not found" });
+    
+    // Only the owner can archive their post
+    if (post.user.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: "You can only archive your own posts" });
+    }
+
+    // Toggle archive status
+    const newArchivedStatus = !post.isArchived;
+    
+    post.isArchived = newArchivedStatus;
+    post.archivedAt = newArchivedStatus ? new Date() : undefined;
+    await post.save();
+
+    res.json({ 
+      success: true, 
+      isArchived: post.isArchived,
+      message: newArchivedStatus ? "Post archived successfully" : "Post unarchived successfully" 
+    });
+  } catch (err) {
+    console.error("Archive Post Error:", err);
+    res.status(500).json({ message: "Failed to archive post" });
+  }
+};
+
+/* =========================
+   GET MY ARCHIVED POSTS
+========================= */
+export const getMyArchivedPosts = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ message: "Unauthorized" });
+
+    const posts = await ImagePost.find({ user: req.user._id, isArchived: true })
+      .populate("user", "username userType")
+      .sort({ archivedAt: -1 });
+
+    const formatted = posts.map(post => ({
+      ...post.toObject(),
+      likes: post.likedBy?.length || 0,
+    }));
+
+    res.json(formatted);
+  } catch (err) {
+    res.status(500).json({ message: "Failed to fetch archived posts" });
   }
 };

@@ -45,6 +45,10 @@ const imagePostSchema = new Schema(
     boostedAt: { type: Date },
     boostExpiresAt: { type: Date },
     boostViews: { type: Number, default: 0 }, // Track views while boosted
+
+    // ✅ ARCHIVE SYSTEM: Allow users to hide posts without deleting
+    isArchived: { type: Boolean, default: false },
+    archivedAt: { type: Date },
   },
   { timestamps: true }
 );
