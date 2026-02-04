@@ -1,0 +1,458 @@
+import { Request, Response } from "express";
+import mongoose from "mongoose";
+import User from "../models/User.js";
+import Collection from "../models/Collection.js";
+import ImagePost from "../models/ImagePost.js";
+import { AuthRequest } from "../middleware/authMiddleware.js";
+import { INTEREST_WEIGHTS } from "../utils/interestUtils.js";
+import { interestBuffer } from "../utils/InterestBuffer.js";
+import { notifyFollow } from "../utils/notificationService.js";
+
+// GET CURRENT USER (for token validation)
+export const getCurrentUser = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ message: "Unauthorized" });
+    
+    const user = await User.findById(req.user._id).select("-password");
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+    
+    res.json(user);
+  } catch (err) {
+    console.error("Get Current User Error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+// FOLLOW USER
+export const followUser = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ message: "Unauthorized" });
+    const { id } = req.params; 
+    const currentUserId = req.user._id;
+
+    if (id === currentUserId.toString()) {
+      return res.status(400).json({ message: "Cannot follow yourself" });
+    }
+
+    // Check if user to follow exists
+    const targetUser = await User.findById(id);
+    if (!targetUser) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Check if already following
+    const currentUser = await User.findById(currentUserId);
+    const isAlreadyFollowing = currentUser?.following?.some(
+      (followingId: any) => followingId.toString() === id
+    );
+
+    if (isAlreadyFollowing) {
+      return res.status(400).json({ message: "Already following this user" });
+    }
+
+    // Update both users
+    await User.findByIdAndUpdate(currentUserId, { $addToSet: { following: id } });
+    await User.findByIdAndUpdate(id, { $addToSet: { followers: currentUserId } });
+
+    // Send follow notification
+    await notifyFollow(id, currentUserId.toString(), req.user.name || req.user.username || "User");
+
+    // Get updated counts
+    const updatedTarget = await User.findById(id);
+    const updatedCurrent = await User.findById(currentUserId);
+
+    res.json({ 
+      message: "Followed successfully",
+      isFollowing: true,
+      followersCount: updatedTarget?.followers?.length || 0,
+      followingCount: updatedCurrent?.following?.length || 0,
+    });
+  } catch (err) {
+    console.error("Follow Error:", err);
+    res.status(500).json({ message: "Error following user" });
+  }
+};
+
+// UNFOLLOW USER
+export const unfollowUser = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ message: "Unauthorized" });
+    const { id } = req.params;
+    const currentUserId = req.user._id;
+
+    if (id === currentUserId.toString()) {
+      return res.status(400).json({ message: "Cannot unfollow yourself" });
+    }
+
+    // Check if user exists
+    const targetUser = await User.findById(id);
+    if (!targetUser) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Update both users
+    await User.findByIdAndUpdate(currentUserId, { $pull: { following: id } });
+    await User.findByIdAndUpdate(id, { $pull: { followers: currentUserId } });
+
+    // Get updated counts
+    const updatedTarget = await User.findById(id);
+    const updatedCurrent = await User.findById(currentUserId);
+
+    res.json({ 
+      message: "Unfollowed successfully",
+      isFollowing: false,
+      followersCount: updatedTarget?.followers?.length || 0,
+      followingCount: updatedCurrent?.following?.length || 0,
+    });
+  } catch (err) {
+    console.error("Unfollow Error:", err);
+    res.status(500).json({ message: "Error unfollowing user" });
+  }
+};
+
+// CHECK IF FOLLOWING
+export const checkFollowStatus = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ message: "Unauthorized" });
+    const { id } = req.params;
+
+    const currentUser = await User.findById(req.user._id);
+    const isFollowing = currentUser?.following?.some(
+      (followingId: any) => followingId.toString() === id
+    ) || false;
+
+    res.json({ isFollowing });
+  } catch (err) {
+    console.error("Check Follow Status Error:", err);
+    res.status(500).json({ message: "Error checking follow status" });
+  }
+};
+
+// GET PROFILE (User Data + Collections + Counts)
+export const getUserProfile = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid User ID format" });
+    }
+
+    const user = await User.findById(id).select("-password");
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // ✅ FIX: Populate 'posts' so frontend gets images, not just IDs
+    let collections: any[] = [];
+    try {
+       collections = await Collection.find({ user: id })
+         .populate({
+            path: 'posts',
+            select: 'images title price', // Select fields needed for display
+            options: { limit: 4 } // Limit preview items if needed
+         });
+    } catch (collectionErr) {
+       console.error("Collection Fetch Error:", collectionErr);
+       collections = [];
+    }
+
+    res.json({
+      user,
+      followersCount: user.followers ? user.followers.length : 0,
+      followingCount: user.following ? user.following.length : 0,
+      collections
+    });
+
+  } catch (err) {
+    console.error("SERVER PROFILE ERROR:", err);
+    res.status(500).json({ message: "Server error fetching profile" });
+  }
+};
+
+// CREATE NEW GROUP (Collection)
+export const createCollection = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ message: "Unauthorized" });
+    const { name, isPrivate } = req.body;
+
+    const newCollection = await Collection.create({
+      user: req.user._id,
+      name,
+      isPrivate: !!isPrivate,
+      posts: []
+    });
+
+    res.status(201).json(newCollection);
+  } catch (err) {
+    res.status(500).json({ message: "Error creating collection" });
+  }
+};
+
+// TOGGLE POST IN COLLECTION (TUCK-IN)
+export const toggleCollectionItem = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ message: "Unauthorized" });
+    
+    const { collectionId } = req.params;
+    const { postId } = req.body;
+
+    if (!postId) return res.status(400).json({ message: "Post ID required" });
+
+    const collection = await Collection.findOne({ _id: collectionId, user: req.user._id });
+    if (!collection) return res.status(404).json({ message: "Collection not found" });
+
+    // Check if post exists (compare strings)
+    const exists = collection.posts.some((p: any) => p.toString() === postId);
+
+    if (exists) {
+      collection.posts = collection.posts.filter((p: any) => p.toString() !== postId);
+    } else {
+      collection.posts.push(new mongoose.Types.ObjectId(postId) as any);
+
+      // 🚀 BUFFERED: Add SAVE Weight (Highest intent - user wants to keep this)
+      const post = await ImagePost.findById(postId);
+      if (post && post.tags && post.tags.length > 0) {
+        interestBuffer.add(req.user._id.toString(), post.tags, INTEREST_WEIGHTS.SAVE);
+      }
+    }
+
+    await collection.save();
+
+    res.json({ 
+      message: exists ? "Removed from collection" : "Added to collection",
+      added: !exists,
+      collection 
+    });
+
+  } catch (err) {
+    console.error("Collection Toggle Error:", err);
+    res.status(500).json({ message: "Error updating collection" });
+  }
+};
+
+// UPDATE USER PROFILE
+export const updateUserProfile = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ message: "Unauthorized" });
+
+    const { name, bio, location, showLocation, profilePic, bannerImg, companyName, address, gstNumber, country } = req.body;
+
+    // Validate required fields
+    if (!name || !name.trim()) {
+      return res.status(400).json({ message: "Name is required" });
+    }
+
+    if (req.user.userType === "business" && (!companyName || !companyName.trim())) {
+      return res.status(400).json({ message: "Company Name is required for business users" });
+    }
+
+    // Build update object
+    const updateData: any = {
+      name: name.trim(),
+      bio: bio?.trim() || "",
+      location: location?.trim() || "",
+      showLocation: showLocation !== undefined ? showLocation : true, // ✅ Include showLocation toggle
+      profilePic: profilePic || "",
+      bannerImg: bannerImg || "",
+    };
+
+    // Add business fields if business user
+    if (req.user.userType === "business") {
+      updateData.companyName = companyName?.trim() || "";
+      updateData.address = address?.trim() || "";
+      updateData.gstNumber = gstNumber?.trim() || "";
+      updateData.country = country?.trim() || "";
+    }
+
+    // Update user
+    const updatedUser = await User.findByIdAndUpdate(
+      req.user._id,
+      updateData,
+      { new: true, runValidators: true }
+    ).select("-password");
+
+    if (!updatedUser) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    res.json({
+      message: "Profile updated successfully",
+      user: updatedUser
+    });
+
+  } catch (err: any) {
+    console.error("Update Profile Error:", err);
+    res.status(500).json({ 
+      message: err.message || "Error updating profile"
+    });
+  }
+};
+
+// GET USER'S FOLLOWERS LIST
+export const getFollowersList = async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const currentUserId = req.user?._id;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid User ID format" });
+    }
+
+    const user = await User.findById(id)
+      .populate({
+        path: 'followers',
+        select: 'username name profilePic userType companyName',
+      });
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Add isFollowing status for each follower
+    let followers: any[] = user.followers || [];
+    
+    if (currentUserId) {
+      const currentUser = await User.findById(currentUserId);
+      const currentFollowing = currentUser?.following?.map((f: any) => f.toString()) || [];
+      
+      followers = (followers as any[]).map((follower: any) => ({
+        _id: follower._id,
+        username: follower.username,
+        name: follower.name,
+        profilePic: follower.profilePic,
+        userType: follower.userType,
+        companyName: follower.companyName,
+        isFollowing: currentFollowing.includes(follower._id.toString()),
+      }));
+    }
+
+    res.json({ users: followers });
+  } catch (err) {
+    console.error("Get Followers Error:", err);
+    res.status(500).json({ message: "Error fetching followers" });
+  }
+};
+
+// GET USER'S FOLLOWING LIST
+export const getFollowingList = async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const currentUserId = req.user?._id;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid User ID format" });
+    }
+
+    const user = await User.findById(id)
+      .populate({
+        path: 'following',
+        select: 'username name profilePic userType companyName',
+      });
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Add isFollowing status for each user in following list
+    let following: any[] = user.following || [];
+    
+    if (currentUserId) {
+      const currentUser = await User.findById(currentUserId);
+      const currentFollowing = currentUser?.following?.map((f: any) => f.toString()) || [];
+      
+      following = (following as any[]).map((f: any) => ({
+        _id: f._id,
+        username: f.username,
+        name: f.name,
+        profilePic: f.profilePic,
+        userType: f.userType,
+        companyName: f.companyName,
+        isFollowing: currentFollowing.includes(f._id.toString()),
+      }));
+    }
+
+    res.json({ users: following });
+  } catch (err) {
+    console.error("Get Following Error:", err);
+    res.status(500).json({ message: "Error fetching following list" });
+  }
+};
+
+// ====== PUSH NOTIFICATION TOKEN MANAGEMENT ======
+
+// Save push token
+export const savePushToken = async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user?._id;
+    const { pushToken, platform } = req.body;
+
+    if (!pushToken) {
+      return res.status(400).json({ message: "Push token is required" });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Initialize pushTokens array if not exists
+    if (!user.pushTokens) {
+      user.pushTokens = [];
+    }
+
+    // Check if token already exists
+    const existingTokenIndex = user.pushTokens.findIndex(
+      (t: any) => t.token === pushToken
+    );
+
+    if (existingTokenIndex === -1) {
+      // Add new token
+      user.pushTokens.push({
+        token: pushToken,
+        platform: platform || 'unknown',
+        createdAt: new Date(),
+      });
+    } else {
+      // Update existing token's timestamp
+      user.pushTokens[existingTokenIndex].createdAt = new Date();
+    }
+
+    await user.save();
+
+    res.json({ message: "Push token saved successfully" });
+  } catch (err) {
+    console.error("Save Push Token Error:", err);
+    res.status(500).json({ message: "Error saving push token" });
+  }
+};
+
+// Remove push token
+export const removePushToken = async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user?._id;
+    const { pushToken } = req.body;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    if (user.pushTokens) {
+      if (pushToken) {
+        // Remove specific token
+        user.pushTokens = user.pushTokens.filter((t: any) => t.token !== pushToken);
+      } else {
+        // Remove all tokens for this user (logout from all devices)
+        user.pushTokens = [];
+      }
+      await user.save();
+    }
+
+    res.json({ message: "Push token removed successfully" });
+  } catch (err) {
+    console.error("Remove Push Token Error:", err);
+    res.status(500).json({ message: "Error removing push token" });
+  }
+};

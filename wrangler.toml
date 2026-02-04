@@ -1,0 +1,19 @@
+name = "heed-r2-worker"
+main = "cloudflare-worker.js"
+compatibility_date = "2024-01-01"
+
+[env.production]
+name = "heed-r2-worker-prod"
+routes = [
+  { pattern = "pub-*.r2.dev/*", zone_name = "r2.dev" }
+]
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "heed-new"
+jurisdiction = "eu"
+preview_bucket_name = "heed-new-preview"
+
+[build]
+command = ""
+cwd = ""
