@@ -252,6 +252,10 @@ export const getSinglePost = async (req: AuthRequest, res: Response) => {
         .populate("user", "username userType name profilePic") as any;
     }
 
+    if (!post) {
+      return res.status(404).json({ message: "Post not found" });
+    }
+
     // 🚀 BUFFERED: Add View Weight (Zero DB latency - batched every 30s)
     if (req.user && post.tags && post.tags.length > 0) {
       interestBuffer.add(req.user._id.toString(), post.tags, INTEREST_WEIGHTS.VIEW);
