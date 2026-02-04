@@ -79,6 +79,9 @@ router.get("/posts/archived", requireAuth, getMyArchivedPosts);
 /* ---------- GET ANY USER'S POSTS (ProfileScreen) ---------- */
 router.get("/user/:userId", getPostsByUser);
 
+/* ---------- SELLER STATS ---------- */
+router.get("/seller/stats", requireAuth, getSellerStats);
+
 /* ---------- GET SIMILAR POSTS (More Like This) ---------- */
 router.get("/:postId/similar", getSimilarPosts);
 
@@ -95,8 +98,5 @@ router.post("/:postId/dont-recommend", requireAuth, dontRecommendPost);
 /* ---------- DELETE & ARCHIVE POST ---------- */
 router.delete("/:postId", requireAuth, deletePost);
 router.post("/:postId/archive", requireAuth, archivePost);
-
-/* ---------- SELLER STATS ---------- */
-router.get("/seller/stats", requireAuth, getSellerStats);
 
 export default router;
