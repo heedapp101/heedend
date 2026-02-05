@@ -45,6 +45,14 @@ export async function sendPushNotificationToUser(
         badge: notification.badge,
         sound: notification.sound || 'default',
         priority: 'high',
+        // Android-specific: specify channel ID for proper notification handling
+        channelId: notification.data?.type === 'chat' || notification.data?.type === 'message' 
+          ? 'messages' 
+          : notification.data?.type?.startsWith('order_') 
+            ? 'orders' 
+            : 'default',
+        // Required for background notifications on Android
+        _displayInForeground: true,
       });
     }
 
