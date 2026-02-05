@@ -51,8 +51,6 @@ export async function sendPushNotificationToUser(
           : notification.data?.type?.startsWith('order_') 
             ? 'orders' 
             : 'default',
-        // Required for background notifications on Android
-        _displayInForeground: true,
       });
     }
 
