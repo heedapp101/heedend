@@ -85,7 +85,7 @@ export const searchAll = async (req: Request, res: Response) => {
       const allUsers = [...textUsers, ...prefixUsers, ...containsUsers];
 
       const norm = query.toLowerCase();
-      const scored = users.map((u: any) => {
+      const scored = allUsers.map((u: any) => {
         const username = String(u.username || "").toLowerCase();
         const name = String(u.name || "").toLowerCase();
         const company = String(u.companyName || "").toLowerCase();
