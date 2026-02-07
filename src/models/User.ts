@@ -141,6 +141,18 @@ const userSchema = new Schema<IUser>(
   { timestamps: true }
 );
 
+// Indexes for faster search and lookup
+userSchema.index({ username: 1 });
+userSchema.index({ name: 1 });
+userSchema.index({ companyName: 1 });
+userSchema.index(
+  { username: "text", name: "text", companyName: "text", bio: "text" },
+  {
+    weights: { username: 10, companyName: 6, name: 4, bio: 1 },
+    name: "user_text_index",
+  }
+);
+
 // ✅ Updated Business Validation Hook
 userSchema.pre("save", function (next) {
   if (this.userType === "business") {
