@@ -459,12 +459,12 @@ export const searchPosts = async (req: Request, res: Response) => {
     if (posts.length === 0) {
       const searchRegex = new RegExp(query, "i");
       posts = await ImagePost.find({
-        $or: [
-          { title: { $regex: searchRegex } },
-          { description: { $regex: searchRegex } },
-          { tags: { $in: [searchRegex] } },
-        ],
-      })
+          $or: [
+            { title: { $regex: searchRegex } },
+            { description: { $regex: searchRegex } },
+            { tags: { $regex: searchRegex } },
+          ],
+        })
         .populate("user", "username userType profilePic")
         .sort({ views: -1, createdAt: -1 })
         .skip(skip)
@@ -970,58 +970,7 @@ export const getExplore = async (req: Request, res: Response) => {
       likes: post.likedBy?.length || 0,
     }));
 
-    // FALLBACK: If tag filtering returns less than expected, add "You might like" posts
-    if (tag && formattedPosts.length < limit) {
-      const existingIds = formattedPosts.map(p => p._id.toString());
-      const fallbackNeeded = limit - formattedPosts.length;
-      
-      // Fetch random posts excluding current tag and already fetched posts
-      const fallbackPosts = await ImagePost.aggregate([
-        { 
-          $match: { 
-            _id: { $nin: existingIds.map(id => new mongoose.Types.ObjectId(id)) },
-            tags: { $not: { $regex: new RegExp(tag, "i") } }
-          } 
-        },
-        { $sample: { size: fallbackNeeded } },
-        {
-          $lookup: {
-            from: "users",
-            localField: "user",
-            foreignField: "_id",
-            as: "user",
-          },
-        },
-        { $unwind: "$user" },
-        {
-          $project: {
-            _id: 1,
-            title: 1,
-            description: 1,
-            images: 1,
-            tags: 1,
-            views: 1,
-            likedBy: 1,
-            isBoosted: 1,
-            createdAt: 1,
-            "user._id": 1,
-            "user.username": 1,
-            "user.userType": 1,
-            "user.profilePic": 1,
-          },
-        },
-      ]);
-
-      const formattedFallback = fallbackPosts.map((post) => ({
-        ...post,
-        type: 'post',
-        source: 'youmightlike', // Marker for "You might like" section
-        likes: post.likedBy?.length || 0,
-      }));
-
-      // Blend fallback posts naturally into the feed
-      formattedPosts = [...formattedPosts, ...formattedFallback];
-    }
+      // NOTE: When filtering by tag, do not inject "you might like" fallbacks.
 
     // Even for non-tag explore, ensure infinite scroll with random fallback
     if (!tag && formattedPosts.length < limit && page > 1) {

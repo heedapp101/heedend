@@ -210,7 +210,7 @@ export const searchAll = async (req: Request, res: Response) => {
                 $or: [
                   { title: { $regex: searchRegex } },
                   { description: { $regex: searchRegex } },
-                  { tags: { $in: [searchRegex] } },
+                  { tags: { $regex: searchRegex } },
                 ],
               },
             ],
