@@ -12,7 +12,7 @@ function getClient(): GoogleGenerativeAI {
 }
 
 /**
- * Generate fashion-specific tags from image using Gemini 2.0 Flash
+ * Generate garment-specific tags from image using Gemini 2.0 Flash
  * Cost: ~$0.01 per 1000 images
  * Returns culturally-aware tags like "saree", "kurta", "lehenga"
  */
@@ -20,35 +20,35 @@ export const generateTagsFromImage = async (buffer: Buffer): Promise<string[]> =
   try {
     // Validate API key
     if (!process.env.GEMINI_API_KEY) {
-      console.warn("⚠️ GEMINI_API_KEY not found, skipping tag generation");
+      console.warn("[WARN] GEMINI_API_KEY not found, skipping tag generation");
       return [];
     }
 
     const model = getClient().getGenerativeModel({ model: "gemini-2.0-flash" });
-    
-    const prompt = `Analyze this product image for an e-commerce platform and provide specific, searchable tags.
 
-Focus on:
-- SPECIFIC clothing types (saree, kurta, lehenga, jeans, t-shirt, dress, palazzo, salwar, dupatta, etc.)
-- Colors (red, blue, black, multicolor, etc.)
-- Patterns (floral, striped, embroidered, plain, printed, etc.)
-- Style & occasion (casual, formal, traditional, ethnic, western, party wear, festive, bridal, etc.)
-- Materials if visible (cotton, silk, denim, chiffon, etc.)
-- Gender/category (women's wear, men's wear, unisex, kids, etc.)
+    const prompt = `You are labeling a product-only clothing image for an e-commerce catalog.
+Return ONLY a JSON array of 6-12 short, lowercase tags.
 
-Requirements:
-- Return 8-12 relevant tags
-- Use lowercase
-- Focus on Indian fashion terms when applicable
-- Be specific, not generic (prefer "red silk saree" over "clothing")
-- Include both English and commonly used terms
+Tags must describe visible garment attributes only:
+- item type (saree, kurta, lehenga, jeans, t-shirt, dress, palazzo, salwar, dupatta, etc.)
+- colors
+- patterns or embellishments
+- materials if visible
+- cut/shape details if visible (sleeve, neckline, length)
+- style/occasion (casual, formal, traditional, festive, etc.)
 
-Format: Return ONLY comma-separated tags, nothing else.
-Example: red saree, silk, traditional wear, ethnic clothing, festive, embroidered, women's clothing, indian wear`;
+Do NOT mention people, age, body, or infer gender. No apologies, no sentences.
+If unclear, return [].
+
+Example: ["red saree", "silk", "embroidered", "gold border", "traditional"]`;
+
+    const fallbackPrompt = `Return ONLY a JSON array of 5-10 short, lowercase tags describing the garment in the image.
+Include item type, colors, pattern/embellishment, and material if visible.
+No sentences, no apologies, no people-related terms. If unclear, return [].`;
 
     // Convert buffer to base64
     const base64Image = buffer.toString("base64");
-    
+
     // Detect mime type from buffer
     const mimeType = detectMimeType(buffer);
 
@@ -59,23 +59,76 @@ Example: red saree, silk, traditional wear, ethnic clothing, festive, embroidere
       },
     };
 
-    const result = await model.generateContent([prompt, imagePart]);
-    const response = await result.response;
-    const text = response.text();
-    
-    // Parse comma-separated tags
-    const tags = text
-      .split(",")
-      .map(tag => tag.trim().toLowerCase())
-      .filter(tag => tag.length > 0 && tag.length < 50) // Filter valid tags
-      .slice(0, 15); // Max 15 tags
-    
-    console.log(`✅ Gemini generated ${tags.length} tags:`, tags.join(", "));
-    return tags;
-    
+    const isRefusal = (text: string) => {
+      const lower = text.toLowerCase();
+      const markers = [
+        "i'm sorry",
+        "i am sorry",
+        "cannot",
+        "can't",
+        "unable",
+        "not able",
+        "i won't",
+        "refuse",
+        "not allowed",
+        "policy",
+      ];
+      return markers.some((m) => lower.includes(m));
+    };
+
+    const parseTags = (text: string): string[] => {
+      const cleaned = text.trim();
+      if (!cleaned) return [];
+      if (isRefusal(cleaned)) return [];
+
+      let tags: string[] = [];
+      if (cleaned.startsWith("[")) {
+        try {
+          const parsed = JSON.parse(cleaned);
+          if (Array.isArray(parsed)) {
+            tags = parsed.map((t) => String(t));
+          }
+        } catch {
+          // fall through to comma parsing
+        }
+      }
+
+      if (tags.length === 0) {
+        tags = cleaned.split(",");
+      }
+
+      return tags
+        .map((tag) => tag.trim().toLowerCase())
+        .filter((tag) => tag.length > 0 && tag.length < 50)
+        .slice(0, 15);
+    };
+
+    const generate = async (inputPrompt: string) => {
+      const result = await model.generateContent([inputPrompt, imagePart]);
+      const response = await result.response;
+      const text = response.text();
+      const tags = parseTags(text);
+      return { text, tags };
+    };
+
+    const primary = await generate(prompt);
+    if (primary.tags.length > 0) {
+      console.log(
+        `[OK] Gemini generated ${primary.tags.length} tags:`,
+        primary.tags.join(", ")
+      );
+      return primary.tags;
+    }
+
+    const fallback = await generate(fallbackPrompt);
+    console.log(
+      `[WARN] Gemini fallback tags (${fallback.tags.length}):`,
+      fallback.tags.join(", ")
+    );
+    return fallback.tags;
   } catch (error: any) {
-    console.error("❌ Gemini Vision API Error:", error);
-    
+    console.error("[ERROR] Gemini Vision API Error:", error);
+
     // Log to compliance system
     try {
       const { logError } = await import("./emailService.js");
@@ -92,7 +145,7 @@ Example: red saree, silk, traditional wear, ethnic clothing, festive, embroidere
     } catch (logErr) {
       console.error("Failed to log error:", logErr);
     }
-    
+
     return []; // Return empty array on failure
   }
 };
@@ -103,12 +156,12 @@ Example: red saree, silk, traditional wear, ethnic clothing, festive, embroidere
 function detectMimeType(buffer: Buffer): string {
   // Check magic numbers (first few bytes)
   const magicNumbers = buffer.toString("hex", 0, 4);
-  
+
   if (magicNumbers.startsWith("ffd8ff")) return "image/jpeg";
   if (magicNumbers.startsWith("89504e47")) return "image/png";
   if (magicNumbers.startsWith("47494638")) return "image/gif";
   if (magicNumbers.startsWith("52494646")) return "image/webp";
-  
+
   // Default to JPEG (most common)
   return "image/jpeg";
 }

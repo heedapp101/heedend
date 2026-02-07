@@ -37,14 +37,39 @@ export const searchAll = async (req: Request, res: Response) => {
       const selectFields =
         "_id username name userType profilePic isVerified companyName email followers";
 
-      // 1. Try full-text search first (uses weighted text index)
+      const selectObj: Record<string, any> = {
+        _id: 1, username: 1, name: 1, userType: 1, profilePic: 1,
+        isVerified: 1, companyName: 1, email: 1, followers: 1,
+      };
+
+      // Build word-boundary regexes for individual words in multi-word queries
+      const queryWords = query.split(/\s+/).filter(Boolean).map(w => escapeRegex(w));
+      const wordRegexes = queryWords.map(w => new RegExp(w, "i"));
+
+      // 1. Prefix regex search (most reliable — run first)
+      const prefixUsers = await User.find({
+        $or: [
+          { username: { $regex: prefixRegex } },
+          { name: { $regex: prefixRegex } },
+          { companyName: { $regex: prefixRegex } },
+          { email: { $regex: prefixRegex } },
+          // Also match individual words against name parts
+          ...wordRegexes.map(wr => ({ name: { $regex: wr } })),
+          ...wordRegexes.map(wr => ({ username: { $regex: wr } })),
+        ],
+      })
+        .select(selectFields)
+        .limit(usersLimit * 3)
+        .lean();
+
+      // 2. Try full-text search for additional results (uses weighted text index)
+      const prefixIds = prefixUsers.map((u: any) => u._id);
       let textUsers: any[] = [];
       try {
         textUsers = await User.find(
-          { $text: { $search: query } },
-          { textScore: { $meta: "textScore" } }
+          { $text: { $search: query }, _id: { $nin: prefixIds } }
         )
-          .select(selectFields)
+          .select({ ...selectObj, textScore: { $meta: "textScore" } })
           .sort({ textScore: { $meta: "textScore" } })
           .limit(usersLimit * 2)
           .lean();
@@ -52,23 +77,8 @@ export const searchAll = async (req: Request, res: Response) => {
         textUsers = [];
       }
 
-      // 2. Prefix regex search
-      const existingTextIds = textUsers.map((u: any) => u._id);
-      const prefixUsers = await User.find({
-        _id: { $nin: existingTextIds },
-        $or: [
-          { username: { $regex: prefixRegex } },
-          { name: { $regex: prefixRegex } },
-          { companyName: { $regex: prefixRegex } },
-          { email: { $regex: prefixRegex } },
-        ],
-      })
-        .select(selectFields)
-        .limit(usersLimit * 2)
-        .lean();
-
-      // 3. Contains regex search (always run to maximize results)
-      const combinedIds = [...existingTextIds, ...prefixUsers.map((u: any) => u._id)];
+      // 3. Contains regex search (catch remaining matches)
+      const combinedIds = [...prefixIds, ...textUsers.map((u: any) => u._id)];
       const containsUsers = await User.find({
         _id: { $nin: combinedIds },
         $or: [
@@ -82,22 +92,41 @@ export const searchAll = async (req: Request, res: Response) => {
         .limit(usersLimit)
         .lean();
 
-      const allUsers = [...textUsers, ...prefixUsers, ...containsUsers];
+      // Deduplicate by _id
+      const seenIds = new Set<string>();
+      const allUsers = [...prefixUsers, ...textUsers, ...containsUsers].filter((u: any) => {
+        const id = String(u._id);
+        if (seenIds.has(id)) return false;
+        seenIds.add(id);
+        return true;
+      });
 
       const norm = query.toLowerCase();
+      const normWords = norm.split(/\s+/).filter(Boolean);
       const scored = allUsers.map((u: any) => {
         const username = String(u.username || "").toLowerCase();
         const name = String(u.name || "").toLowerCase();
         const company = String(u.companyName || "").toLowerCase();
         const followersCount = Array.isArray(u.followers) ? u.followers.length : 0;
 
+        // Split name into individual words for word-level matching
+        const nameWords = name.split(/\s+/).filter(Boolean);
+        const companyWords = company.split(/\s+/).filter(Boolean);
+
         let score = 0;
         if (username === norm) score += 100;
         if (username.startsWith(norm)) score += 60;
+        if (name === norm) score += 50;
         if (name.startsWith(norm)) score += 30;
         if (company.startsWith(norm)) score += 25;
         if (username.includes(norm)) score += 20;
         if (name.includes(norm)) score += 10;
+
+        // Word-level matching: boost if query matches any word in name exactly
+        if (nameWords.some(w => w === norm)) score += 40;
+        if (companyWords.some(w => w === norm)) score += 35;
+        // Boost if every query word matches a name word
+        if (normWords.length > 1 && normWords.every(qw => nameWords.some(nw => nw.startsWith(qw)))) score += 45;
         if (company.includes(norm)) score += 10;
         if (u.isVerified) score += 5;
         score += Math.min(10, followersCount / 100);
