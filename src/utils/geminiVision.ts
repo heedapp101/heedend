@@ -77,9 +77,36 @@ No sentences, no apologies, no people-related terms. If unclear, return [].`;
     };
 
     const parseTags = (text: string): string[] => {
-      const cleaned = text.trim();
+      const normalizeQuotes = (value: string) =>
+        value.replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
+
+      const cleaned = normalizeQuotes(text).trim();
       if (!cleaned) return [];
       if (isRefusal(cleaned)) return [];
+
+      const cleanTag = (tag: string) => {
+        const trimmed = tag
+          .trim()
+          .replace(/^[\[\]\(\)\{\}]+|[\[\]\(\)\{\}]+$/g, "")
+          .replace(/^["']+|["']+$/g, "")
+          .replace(/^\d+\s*[\.\)\-:]\s*/g, "")
+          .replace(/^[-•*]\s*/g, "")
+          .trim();
+        return trimmed;
+      };
+
+      const extractQuoted = (value: string) => {
+        const results: string[] = [];
+        const doubleQuoted = value.matchAll(/"([^"]+)"/g);
+        for (const match of doubleQuoted) {
+          if (match[1]) results.push(match[1]);
+        }
+        const singleQuoted = value.matchAll(/'([^']+)'/g);
+        for (const match of singleQuoted) {
+          if (match[1]) results.push(match[1]);
+        }
+        return results;
+      };
 
       let tags: string[] = [];
       if (cleaned.startsWith("[")) {
@@ -89,16 +116,24 @@ No sentences, no apologies, no people-related terms. If unclear, return [].`;
             tags = parsed.map((t) => String(t));
           }
         } catch {
-          // fall through to comma parsing
+          // fall through to other parsing strategies
         }
       }
 
       if (tags.length === 0) {
-        tags = cleaned.split(",");
+        const quoted = extractQuoted(cleaned);
+        if (quoted.length > 0) {
+          tags = quoted;
+        }
+      }
+
+      if (tags.length === 0) {
+        const normalized = cleaned.replace(/\r?\n+/g, ",");
+        tags = normalized.split(/[,\|]/);
       }
 
       return tags
-        .map((tag) => tag.trim().toLowerCase())
+        .map((tag) => cleanTag(tag).toLowerCase())
         .filter((tag) => tag.length > 0 && tag.length < 50)
         .slice(0, 15);
     };

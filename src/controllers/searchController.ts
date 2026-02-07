@@ -48,6 +48,7 @@ export const searchAll = async (req: Request, res: Response) => {
 
       // 1. Prefix regex search (most reliable — run first)
       const prefixUsers = await User.find({
+        userType: { $ne: "admin" },
         $or: [
           { username: { $regex: prefixRegex } },
           { name: { $regex: prefixRegex } },
@@ -67,7 +68,7 @@ export const searchAll = async (req: Request, res: Response) => {
       let textUsers: any[] = [];
       try {
         textUsers = await User.find(
-          { $text: { $search: query }, _id: { $nin: prefixIds } }
+          { $text: { $search: query }, _id: { $nin: prefixIds }, userType: { $ne: "admin" } }
         )
           .select({ ...selectObj, textScore: { $meta: "textScore" } })
           .sort({ textScore: { $meta: "textScore" } })
@@ -81,6 +82,7 @@ export const searchAll = async (req: Request, res: Response) => {
       const combinedIds = [...prefixIds, ...textUsers.map((u: any) => u._id)];
       const containsUsers = await User.find({
         _id: { $nin: combinedIds },
+        userType: { $ne: "admin" },
         $or: [
           { username: { $regex: containsRegex } },
           { name: { $regex: containsRegex } },
@@ -94,7 +96,9 @@ export const searchAll = async (req: Request, res: Response) => {
 
       // Deduplicate by _id
       const seenIds = new Set<string>();
-      const allUsers = [...prefixUsers, ...textUsers, ...containsUsers].filter((u: any) => {
+      const allUsers = [...prefixUsers, ...textUsers, ...containsUsers]
+        .filter((u: any) => u?.userType !== "admin")
+        .filter((u: any) => {
         const id = String(u._id);
         if (seenIds.has(id)) return false;
         seenIds.add(id);
