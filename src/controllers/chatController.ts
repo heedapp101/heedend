@@ -409,3 +409,92 @@ export const getUnreadCount = async (req: AuthRequest, res: Response) => {
     return res.status(500).json({ message: "Server error" });
   }
 };
+
+// --- Send Offer Price (Business Users Only) ---
+export const sendOfferPrice = async (req: AuthRequest, res: Response) => {
+  try {
+    const { chatId } = req.params;
+    const { offerPrice, inquiryId, product } = req.body;
+    const userId = req.user?._id;
+    const userType = req.user?.userType;
+
+    // Only business users can send offers
+    if (userType !== "business") {
+      return res.status(403).json({ message: "Only business users can send offers" });
+    }
+
+    if (!offerPrice || offerPrice <= 0) {
+      return res.status(400).json({ message: "Valid offer price required" });
+    }
+
+    if (!product || !product.postId || !product.title) {
+      return res.status(400).json({ message: "Product information required" });
+    }
+
+    const chat = await Chat.findById(chatId);
+
+    if (!chat) {
+      return res.status(404).json({ message: "Chat not found" });
+    }
+
+    // Verify user is participant
+    const isParticipant = chat.participants.some(
+      (p) => p.toString() === userId?.toString()
+    );
+
+    if (!isParticipant) {
+      return res.status(403).json({ message: "Not authorized" });
+    }
+
+    // Create offer product with new price
+    const offerProduct = {
+      postId: new Types.ObjectId(product.postId),
+      title: product.title,
+      price: offerPrice,
+      image: product.image || "",
+    };
+
+    // Create offer message
+    const newMessage: IMessage = {
+      sender: new Types.ObjectId(userId),
+      content: `Offer price: ₹${offerPrice.toLocaleString("en-IN")}`,
+      messageType: "product",
+      product: offerProduct,
+      inquiryId: inquiryId ? new Types.ObjectId(inquiryId) : chat.activeInquiryId,
+      isRead: false,
+      createdAt: new Date(),
+    };
+
+    chat.messages.push(newMessage);
+    chat.lastMessage = {
+      content: `💰 Offer: ₹${offerPrice.toLocaleString("en-IN")}`,
+      sender: new Types.ObjectId(userId),
+      createdAt: new Date(),
+    };
+
+    // Update inquiry status to replied if exists
+    if (inquiryId || chat.activeInquiryId) {
+      const targetInquiryId = inquiryId || chat.activeInquiryId?.toString();
+      const inquiry = chat.inquiries.find(
+        (i) => i._id?.toString() === targetInquiryId
+      );
+      if (inquiry && inquiry.status === "active") {
+        inquiry.status = "replied";
+      }
+    }
+
+    await chat.save();
+
+    // Get the saved message
+    const savedMessage = chat.messages[chat.messages.length - 1];
+
+    return res.status(201).json({
+      success: true,
+      message: savedMessage,
+      chatId: chat._id,
+    });
+  } catch (error) {
+    console.error("Error in sendOfferPrice:", error);
+    return res.status(500).json({ message: "Server error" });
+  }
+};

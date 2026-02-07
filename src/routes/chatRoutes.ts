@@ -10,6 +10,7 @@ import {
   adminInitiateChat,
   markMessagesRead,
   getUnreadCount,
+  sendOfferPrice,
 } from "../controllers/chatController.js";
 import { requireAuth } from "../middleware/authMiddleware.js";
 import { adminMiddleware } from "../middleware/roleMiddleware.js";
@@ -36,6 +37,9 @@ router.get("/:chatId", getChatById);
 
 // Send message to chat
 router.post("/:chatId/message", sendMessage);
+
+// Send offer price (business users only)
+router.post("/:chatId/offer", sendOfferPrice);
 
 // Mark messages as read
 router.put("/:chatId/read", markMessagesRead);
