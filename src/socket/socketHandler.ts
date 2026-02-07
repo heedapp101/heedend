@@ -184,7 +184,13 @@ export function initializeSocket(server: HttpServer) {
 
         chat.messages.push(newMessage);
         chat.lastMessage = {
-          content: startInquiry ? `📦 Inquiry: ${product?.title}` : (messageType === "product" ? `📦 ${product?.title}` : content),
+          content: startInquiry
+            ? `📦 Inquiry: ${product?.title}`
+            : messageType === "product"
+              ? `📦 ${product?.title}`
+              : messageType === "image"
+                ? "Photo"
+                : content,
           sender: new Types.ObjectId(socket.userId),
           createdAt: new Date(),
         };

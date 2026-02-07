@@ -210,7 +210,11 @@ export const sendMessage = async (req: AuthRequest, res: Response) => {
 
     chat.messages.push(newMessage);
     chat.lastMessage = {
-      content: messageType === "product" ? `📦 ${product?.title || "Product"}` : content,
+      content: messageType === "product"
+        ? `📦 ${product?.title || "Product"}`
+        : messageType === "image"
+          ? "Photo"
+          : content,
       sender: new Types.ObjectId(userId),
       createdAt: new Date(),
     };
