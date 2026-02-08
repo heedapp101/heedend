@@ -17,6 +17,7 @@ export interface IUser extends Document {
   password: string;
   phone: string;
   isVerified: boolean;
+  googleId?: string; // ✅ For Google Sign In
 
   // --- Common Optional Fields ---
   bio?: string;
@@ -79,6 +80,7 @@ const userSchema = new Schema<IUser>(
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
     password: { type: String, required: true },
     phone: { type: String, required: true },
+    googleId: { type: String, sparse: true, index: true }, // ✅ For Google Sign In
 
     // --- Profile Assets ---
     bio: { type: String, trim: true },

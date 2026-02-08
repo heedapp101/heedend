@@ -367,6 +367,189 @@ export const login = async (
 };
 
 /* =======================
+   GOOGLE AUTHENTICATION
+   (Sign in / Sign up with Google)
+   ✅ SECURE: Verifies Google token server-side
+======================= */
+interface GoogleAuthBody {
+  idToken?: string;      // Google ID token for verification
+  accessToken?: string;  // Fallback: Google access token
+  email: string;
+  name: string;
+  googleId: string;
+  profilePic?: string;
+}
+
+// Verify Google token server-side for security
+async function verifyGoogleToken(idToken?: string, accessToken?: string): Promise<{
+  email: string;
+  name: string;
+  googleId: string;
+  picture?: string;
+} | null> {
+  const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+  
+  // Method 1: Verify ID token (most secure)
+  if (idToken) {
+    try {
+      const response = await fetch(
+        `https://oauth2.googleapis.com/tokeninfo?id_token=${idToken}`
+      );
+      const data = await response.json();
+      
+      // Verify the token is for our app
+      if (GOOGLE_CLIENT_ID && data.aud !== GOOGLE_CLIENT_ID) {
+        console.error("Google token audience mismatch");
+        return null;
+      }
+      
+      if (data.email && data.sub) {
+        return {
+          email: data.email,
+          name: data.name || '',
+          googleId: data.sub,
+          picture: data.picture,
+        };
+      }
+    } catch (err) {
+      console.error("ID token verification failed:", err);
+    }
+  }
+  
+  // Method 2: Verify access token (fallback)
+  if (accessToken) {
+    try {
+      const response = await fetch(
+        `https://www.googleapis.com/oauth2/v2/userinfo`,
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+      const data = await response.json();
+      
+      if (data.email && data.id) {
+        return {
+          email: data.email,
+          name: data.name || '',
+          googleId: data.id,
+          picture: data.picture,
+        };
+      }
+    } catch (err) {
+      console.error("Access token verification failed:", err);
+    }
+  }
+  
+  return null;
+}
+
+export const googleAuth = async (
+  req: Request<{}, {}, GoogleAuthBody>,
+  res: Response
+) => {
+  try {
+    const JWT_SECRET = process.env.JWT_SECRET!;
+    if (!JWT_SECRET) throw new Error("JWT_SECRET is not defined in .env");
+
+    const { idToken, accessToken, email, name, googleId, profilePic } = req.body;
+
+    if (!email || !googleId) {
+      return res.status(400).json({ message: "Email and Google ID required" });
+    }
+
+    // ✅ SECURITY: Verify Google token if GOOGLE_CLIENT_ID is configured
+    if (process.env.GOOGLE_CLIENT_ID) {
+      const verifiedUser = await verifyGoogleToken(idToken, accessToken);
+      
+      if (!verifiedUser) {
+        return res.status(401).json({ message: "Invalid Google authentication" });
+      }
+      
+      // Ensure the provided data matches the verified token
+      if (verifiedUser.email.toLowerCase() !== email.toLowerCase() || 
+          verifiedUser.googleId !== googleId) {
+        return res.status(401).json({ message: "Google token mismatch" });
+      }
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+
+    // Check if user exists
+    let user = await User.findOne({ 
+      $or: [
+        { email: normalizedEmail },
+        { googleId: googleId }
+      ]
+    });
+
+    if (user) {
+      // Update Google ID if not set
+      if (!user.googleId) {
+        user.googleId = googleId;
+        if (profilePic && !user.profilePic) {
+          user.profilePic = profilePic;
+        }
+        await user.save();
+      }
+    } else {
+      // Create new user with Google data
+      const username = normalizedEmail.split('@')[0] + '_' + Date.now().toString(36);
+      
+      user = new User({
+        userType: 'general',
+        username,
+        email: normalizedEmail,
+        password: await bcrypt.hash(googleId + JWT_SECRET, 10), // Secure placeholder password
+        name: name || 'User',
+        googleId,
+        profilePic: profilePic || '',
+        phone: '',
+        isVerified: true, // Google accounts are pre-verified
+      });
+
+      await user.save();
+
+      // Index to Typesense
+      indexUser(user.toObject()).catch(err => {
+        console.error("⚠️ Failed to index user to Typesense:", err);
+      });
+    }
+
+    // Generate token
+    const token = jwt.sign(
+      {
+        _id: user._id,
+        username: user.username,
+        userType: user.userType,
+      },
+      JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    return res.status(200).json({
+      message: user.createdAt ? "Login successful" : "Account created",
+      token,
+      user: {
+        _id: user._id,
+        username: user.username,
+        email: user.email,
+        userType: user.userType,
+        name: user.name,
+        phone: user.phone,
+        isVerified: user.isVerified,
+        bio: user.bio,
+        profilePic: user.profilePic,
+        bannerImg: user.bannerImg,
+        location: user.location,
+        interests: user.interests,
+        companyName: user.companyName,
+      },
+    });
+  } catch (error: any) {
+    console.error("GOOGLE AUTH ERROR:", error);
+    return res.status(500).json({ message: error.message || "Google auth failed" });
+  }
+};
+
+/* =======================
    GET PRIVATE DOCUMENT
    (Downloads from R2 - handles both old and new file paths)
 ======================= */

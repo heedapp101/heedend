@@ -2,6 +2,7 @@ import express from "express";
 import { 
   signup, 
   login, 
+  googleAuth,
   generateUploadUrl, 
   uploadImage, // ✅ Import the new controller
   getPrivateDocument // ✅ NEW: Get private documents
@@ -26,6 +27,7 @@ router.get("/upload-url", generateUploadUrl);
 
 router.post("/signup", signup);
 router.post("/login", login);
+router.post("/google", googleAuth); // ✅ Google Sign In
 
 // ✅ NEW: Get private documents (documents, ID proofs, etc)
 router.get("/document/:filename", getPrivateDocument);
