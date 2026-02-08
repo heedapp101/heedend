@@ -59,6 +59,10 @@ export interface IUser extends Document {
     platform: 'ios' | 'android' | 'unknown';
     createdAt: Date;
   }[];
+  
+  // --- Timestamps (auto-added by Mongoose) ---
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 const userSchema = new Schema<IUser>(
