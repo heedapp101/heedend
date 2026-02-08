@@ -7,6 +7,7 @@ import { AuthRequest } from "../middleware/authMiddleware.js";
 import { INTEREST_WEIGHTS } from "../utils/interestUtils.js";
 import { interestBuffer } from "../utils/InterestBuffer.js";
 import { notifyFollow } from "../utils/notificationService.js";
+import { indexUser } from "../services/typesenseSync.js";
 
 // GET CURRENT USER (for token validation)
 export const getCurrentUser = async (req: AuthRequest, res: Response) => {
@@ -63,6 +64,10 @@ export const followUser = async (req: AuthRequest, res: Response) => {
     const updatedTarget = await User.findById(id);
     const updatedCurrent = await User.findById(currentUserId);
 
+    // ✅ Update Typesense index for both users (follower counts changed)
+    if (updatedTarget) indexUser(updatedTarget.toObject()).catch(() => {});
+    if (updatedCurrent) indexUser(updatedCurrent.toObject()).catch(() => {});
+
     res.json({ 
       message: "Followed successfully",
       isFollowing: true,
@@ -99,6 +104,10 @@ export const unfollowUser = async (req: AuthRequest, res: Response) => {
     // Get updated counts
     const updatedTarget = await User.findById(id);
     const updatedCurrent = await User.findById(currentUserId);
+
+    // ✅ Update Typesense index for both users (follower counts changed)
+    if (updatedTarget) indexUser(updatedTarget.toObject()).catch(() => {});
+    if (updatedCurrent) indexUser(updatedCurrent.toObject()).catch(() => {});
 
     res.json({ 
       message: "Unfollowed successfully",
@@ -276,6 +285,11 @@ export const updateUserProfile = async (req: AuthRequest, res: Response) => {
     if (!updatedUser) {
       return res.status(404).json({ message: "User not found" });
     }
+
+    // ✅ Update Typesense index
+    indexUser(updatedUser.toObject()).catch(err => {
+      console.error("⚠️ Failed to update user in Typesense:", err);
+    });
 
     res.json({
       message: "Profile updated successfully",

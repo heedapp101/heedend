@@ -3,7 +3,10 @@ import mongoose, { Schema } from "mongoose";
 const imageSchema = new Schema(
   {
     high: { type: String, required: true },
+    grid: { type: String },
     low: { type: String, required: true },
+    width: { type: Number },
+    height: { type: Number },
   },
   { _id: false }
 );

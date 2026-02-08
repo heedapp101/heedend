@@ -6,6 +6,7 @@ import User from "../models/User.js";
 import { getPresignedUrl } from "../cloudflare.js";
 import { uploadFile, s3 } from "../utils/cloudflareR2.js";
 import { processImage } from "../utils/ProcessImage.js";
+import { indexUser } from "../services/typesenseSync.js";
 
 /* =======================
    REQUEST BODY TYPES
@@ -177,6 +178,11 @@ export const signup = async (
     });
 
     await newUser.save();
+
+    // ✅ Index to Typesense for fast search
+    indexUser(newUser.toObject()).catch(err => {
+      console.error("⚠️ Failed to index user to Typesense:", err);
+    });
 
     // 5. Generate Token
     const token = jwt.sign(

@@ -1,6 +1,12 @@
 import { Request, Response } from "express";
 import ImagePost from "../models/ImagePost.js";
 import User from "../models/User.js";
+import { isTypesenseAvailable } from "../config/typesense.js";
+import {
+  searchAll as typesenseSearchAll,
+  searchPostsByTags,
+  findSimilarPosts,
+} from "../services/typesenseSearch.js";
 
 const clamp = (value: number, min: number, max: number) =>
   Math.max(min, Math.min(max, value));
@@ -8,14 +14,32 @@ const clamp = (value: number, min: number, max: number) =>
 const escapeRegex = (value: string) =>
   value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+/**
+ * Unified Search Controller
+ * Uses Typesense when available (~5ms), falls back to MongoDB (~50-200ms)
+ */
 export const searchAll = async (req: Request, res: Response) => {
   try {
     const raw = String(req.query.q || "").trim();
-    if (!raw) return res.json({ users: [], posts: [], tags: [] });
+    if (!raw) return res.json({ users: [], posts: [], tags: [], similar: [] });
 
     const mode = raw.startsWith("@") ? "users" : raw.startsWith("#") ? "tags" : "all";
     const query = raw.replace(/^[@#]/, "").trim();
-    if (!query) return res.json({ users: [], posts: [], tags: [] });
+    if (!query) return res.json({ users: [], posts: [], tags: [], similar: [] });
+
+    // ==========================================
+    // TRY TYPESENSE FIRST (Fast Path ~5ms)
+    // ==========================================
+    const typesenseAvailable = await isTypesenseAvailable();
+    
+    if (typesenseAvailable) {
+      return await searchWithTypesense(req, res, query, mode);
+    }
+    
+    // ==========================================
+    // FALLBACK TO MONGODB (Slow Path ~50-200ms)
+    // ==========================================
+    console.log("⚠️ Using MongoDB fallback for search");
 
     const usersLimit = clamp(parseInt(req.query.usersLimit as string) || 8, 0, 20);
     const postsLimit = clamp(parseInt(req.query.postsLimit as string) || 20, 0, 50);
@@ -294,3 +318,141 @@ export const searchAll = async (req: Request, res: Response) => {
     res.status(500).json({ message: "Failed to search" });
   }
 };
+
+// ==========================================
+// TYPESENSE SEARCH (Fast ~5ms)
+// ==========================================
+async function searchWithTypesense(
+  req: Request,
+  res: Response,
+  query: string,
+  mode: string
+) {
+  const usersLimit = clamp(parseInt(req.query.usersLimit as string) || 8, 0, 20);
+  const postsLimit = clamp(parseInt(req.query.postsLimit as string) || 20, 0, 50);
+  const tagsLimit = clamp(parseInt(req.query.tagsLimit as string) || 10, 0, 20);
+  const page = clamp(parseInt(req.query.page as string) || 1, 1, 1000);
+
+  try {
+    if (mode === "tags") {
+      // Tag search mode - search posts by tag
+      const postsResult = await searchPostsByTags([query], { page, limit: postsLimit });
+      
+      // Find similar posts
+      const allTags = [...new Set(postsResult.hits.flatMap((p) => p.tags || []))];
+      const similar = allTags.length > 0 
+        ? await findSimilarPosts(allTags, "", 10)
+        : [];
+
+      return res.json({
+        users: [],
+        posts: postsResult.hits.map(formatTypesensePost),
+        tags: [{ tag: query, count: postsResult.found }],
+        similar: similar.map(formatTypesensePost),
+        _meta: {
+          engine: "typesense",
+          searchTimeMs: postsResult.searchTimeMs,
+          totalPosts: postsResult.found,
+        },
+      });
+    }
+
+    if (mode === "users") {
+      // User search mode
+      const result = await typesenseSearchAll({
+        query,
+        postsLimit: 0,
+        usersLimit,
+        tagsLimit: 0,
+        page,
+      });
+
+      return res.json({
+        users: result.users.hits.map(formatTypesenseUser),
+        posts: [],
+        tags: [],
+        similar: [],
+        _meta: {
+          engine: "typesense",
+          searchTimeMs: result.searchTimeMs,
+        },
+      });
+    }
+
+    // All mode - search everything
+    const result = await typesenseSearchAll({
+      query,
+      postsLimit,
+      usersLimit,
+      tagsLimit,
+      page,
+    });
+
+    // Find similar posts based on tags from results
+    const allTags = [...new Set(result.posts.hits.flatMap((p) => p.tags || []))];
+    const excludeIds = result.posts.hits.map((p) => p.id);
+    const similar = allTags.length > 0
+      ? await findSimilarPosts(allTags, excludeIds[0] || "", 10)
+      : [];
+
+    return res.json({
+      users: result.users.hits.map(formatTypesenseUser),
+      posts: result.posts.hits.map(formatTypesensePost),
+      tags: result.tags,
+      similar: similar.map(formatTypesensePost),
+      _meta: {
+        engine: "typesense",
+        searchTimeMs: result.searchTimeMs,
+        totalPosts: result.posts.found,
+        totalUsers: result.users.found,
+      },
+    });
+  } catch (error) {
+    console.error("Typesense search error, falling back to MongoDB:", error);
+    // Don't fail - let the MongoDB fallback handle it
+    throw error;
+  }
+}
+
+/**
+ * Format Typesense post result to match MongoDB format
+ */
+function formatTypesensePost(post: any) {
+  return {
+    _id: post.id,
+    title: post.title,
+    description: post.description,
+    tags: post.tags,
+    price: post.price,
+    views: post.views,
+    likes: post.likes,
+    images: [{ low: post.imageUrl, high: post.imageUrlHigh }],
+    createdAt: new Date(post.createdAt),
+    user: {
+      _id: post.userId,
+      username: post.username,
+      userType: post.userType,
+      profilePic: post.profilePic,
+      companyName: post.companyName,
+      isVerified: post.isVerified,
+    },
+    isBoosted: post.isBoosted,
+    _highlights: post._highlights,
+  };
+}
+
+/**
+ * Format Typesense user result to match MongoDB format
+ */
+function formatTypesenseUser(user: any) {
+  return {
+    _id: user.id,
+    username: user.username,
+    name: user.name,
+    userType: user.userType,
+    profilePic: user.profilePic,
+    isVerified: user.isVerified,
+    companyName: user.companyName,
+    followersCount: user.followersCount,
+  };
+}

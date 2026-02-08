@@ -5,12 +5,14 @@ import Ad from "../models/Ad.js";
 import RecommendationAnalytics from "../models/RecommendationAnalytics.js";
 import Report from "../models/Report.js";
 import { processImage } from "../utils/ProcessImage.js";
+import sharp from "sharp";
 import { uploadFile } from "../utils/cloudflareR2.js";
 import { queueTagGeneration } from "../utils/tagQueue.js"; 
 import { AuthRequest } from "../middleware/authMiddleware.js";
 import { INTEREST_WEIGHTS } from "../utils/interestUtils.js";
 import { interestBuffer } from "../utils/InterestBuffer.js";
 import { notifyLike } from "../utils/notificationService.js";
+import { indexPost, deletePostFromIndex } from "../services/typesenseSync.js";
 
 // Tag generation now happens asynchronously via queue system
 // No blocklist needed - Gemini is prompted for specific fashion terms
@@ -74,7 +76,7 @@ export const createImagePost = async (req: AuthRequest, res: Response) => {
     // ---------------------------------------------------------
     // ✅ STEP B: Process Images (Upload Only - Fast!)
     // ---------------------------------------------------------
-    const images: { high: string; low: string }[] = [];
+    const images: { high: string; grid?: string; low: string; width?: number; height?: number }[] = [];
     const imageBuffers: Buffer[] = []; // Store buffers for async tag generation
 
     for (const file of files) {
@@ -86,25 +88,40 @@ export const createImagePost = async (req: AuthRequest, res: Response) => {
       imageBuffers.push(file.buffer);
 
       // Try processing with Sharp, fallback to original upload if it fails
-      let processed: { high: string; low: string };
+      let processed: { high: string; grid?: string; low: string; width?: number; height?: number };
 
       try {
         // Just upload - no AI processing during upload!
         processed = await processImage(file.buffer, name);
       } catch (processError: any) {
         console.warn(`⚠️ [CreatePost] Image processing failed, uploading original: ${processError.message}`);
-        
+        let width: number | undefined;
+        let height: number | undefined;
+        try {
+          const metadata = await sharp(file.buffer, { failOn: "none" }).rotate().metadata();
+          width = metadata.width;
+          height = metadata.height;
+        } catch {
+          // Ignore metadata failures
+        }
+
         // Fallback: Upload original file without processing
         const fallbackUpload = await uploadFile(file, "public");
         processed = {
           high: fallbackUpload.Location,
-          low: fallbackUpload.Location, // Use same URL for both if processing failed
+          grid: fallbackUpload.Location,
+          low: fallbackUpload.Location, // Use same URL for all if processing failed
+          width,
+          height,
         };
       }
 
       images.push({
         high: processed.high,
+        grid: processed.grid,
         low: processed.low,
+        width: processed.width,
+        height: processed.height,
       });
     }
 
@@ -146,7 +163,12 @@ export const createImagePost = async (req: AuthRequest, res: Response) => {
     }
 
     const populatedPost = await ImagePost.findById(post._id)
-      .populate("user", "username userType");
+      .populate("user", "username userType profilePic companyName isVerified");
+
+    // ✅ Index to Typesense for fast search
+    indexPost(populatedPost!.toObject(), populatedPost!.user).catch(err => {
+      console.error("⚠️ Failed to index post to Typesense:", err);
+    });
 
     return res.status(201).json({
       ...populatedPost!.toObject(),
@@ -1697,6 +1719,11 @@ export const deletePost = async (req: AuthRequest, res: Response) => {
     // Delete the post
     await ImagePost.findByIdAndDelete(postId);
 
+    // ✅ Remove from Typesense index
+    deletePostFromIndex(postId).catch(err => {
+      console.error("⚠️ Failed to remove post from Typesense:", err);
+    });
+
     res.json({ success: true, message: "Post deleted successfully" });
   } catch (err) {
     console.error("Delete Post Error:", err);
@@ -1727,6 +1754,13 @@ export const archivePost = async (req: AuthRequest, res: Response) => {
     post.isArchived = newArchivedStatus;
     post.archivedAt = newArchivedStatus ? new Date() : undefined;
     await post.save();
+
+    // ✅ Update Typesense index (archived posts are filtered out)
+    const populatedPost = await ImagePost.findById(postId)
+      .populate("user", "username userType profilePic companyName isVerified");
+    indexPost(populatedPost!.toObject(), populatedPost!.user).catch(err => {
+      console.error("⚠️ Failed to update Typesense index:", err);
+    });
 
     res.json({ 
       success: true, 

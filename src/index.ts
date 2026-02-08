@@ -10,6 +10,7 @@ import { createServer } from "http";
 import { connectDB } from "./config/db.js";
 import { initializeSocket } from "./socket/socketHandler.js";
 import { initializeTagWorker } from "./workers/tagWorker.js"; // ✅ Tag Worker
+import { initializeTypesense } from "./services/typesenseSync.js"; // ✅ Typesense Search
 
 // Routes Imports
 import authRoutes from "./routes/authRoutes.js";
@@ -185,4 +186,13 @@ httpServer.listen(PORT, "0.0.0.0", () => {
   
   // ✅ Initialize background tag generation worker
   initializeTagWorker();
+  
+  // ✅ Initialize Typesense search (non-blocking, with fallback)
+  initializeTypesense().then((available) => {
+    if (available) {
+      console.log("✅ Typesense search engine ready (~5ms searches)");
+    } else {
+      console.log("ℹ️ Using MongoDB for search (configure TYPESENSE_* env vars for faster search)");
+    }
+  });
 });
