@@ -24,6 +24,7 @@ import orderRoutes from "./routes/orderRoutes.js"; // ✅ ORDER ROUTES
 import complianceRoutes from "./routes/complianceRoutes.js"; // ✅ COMPLIANCE ROUTES
 import notificationRoutes from "./routes/notificationRoutes.js"; // ✅ NOTIFICATION ROUTES
 import searchRoutes from "./routes/searchRoutes.js"; // ✅ SEARCH ROUTES
+import contactRoutes from "./routes/contactRoutes.js"; // ✅ CONTACT ROUTES
 
 // Error handling middleware
 import { errorHandler, notFoundHandler } from "./middleware/errorMiddleware.js";
@@ -167,6 +168,7 @@ app.use("/api/orders", sensitiveLimiter, orderRoutes); // ✅ ORDER ROUTES (rate
 app.use("/api/compliance", complianceRoutes); // ✅ COMPLIANCE ROUTES
 app.use("/api/notifications", notificationRoutes); // ✅ NOTIFICATION ROUTES
 app.use("/api/search", searchRoutes); // ✅ SEARCH ROUTES
+app.use("/api/contact", contactRoutes); // ✅ CONTACT ROUTES
 
 // Health check endpoint
 app.get("/health", (req, res) => {
