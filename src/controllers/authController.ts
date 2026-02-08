@@ -8,6 +8,181 @@ import { uploadFile, s3 } from "../utils/cloudflareR2.js";
 import { processImage } from "../utils/ProcessImage.js";
 import { indexUser } from "../services/typesenseSync.js";
 
+// In-memory OTP store (use Redis in production)
+const otpStore = new Map<string, { otp: string; expiresAt: number; verified: boolean }>();
+
+/* =======================
+   CHECK USERNAME AVAILABILITY
+   Returns suggestions if taken
+======================= */
+export const checkUsername = async (req: Request, res: Response) => {
+  try {
+    const { username } = req.body;
+    
+    if (!username || username.length < 3) {
+      return res.status(400).json({ message: "Username must be at least 3 characters" });
+    }
+
+    const normalizedUsername = username.toLowerCase().trim();
+    const existingUser = await User.findOne({ username: normalizedUsername });
+
+    if (!existingUser) {
+      return res.status(200).json({ 
+        available: true, 
+        username: normalizedUsername 
+      });
+    }
+
+    // Generate suggestions
+    const suggestions: string[] = [];
+    const baseUsername = normalizedUsername.replace(/[0-9_]+$/, ''); // Remove trailing numbers/underscores
+    
+    // Try with random numbers
+    for (let i = 0; i < 5; i++) {
+      const suffix = Math.floor(Math.random() * 9999);
+      const suggestion = `${baseUsername}${suffix}`;
+      const exists = await User.findOne({ username: suggestion });
+      if (!exists && !suggestions.includes(suggestion)) {
+        suggestions.push(suggestion);
+      }
+      if (suggestions.length >= 3) break;
+    }
+
+    // Try with underscores
+    if (suggestions.length < 3) {
+      const withUnderscore = `${baseUsername}_${Math.floor(Math.random() * 99)}`;
+      const exists = await User.findOne({ username: withUnderscore });
+      if (!exists) suggestions.push(withUnderscore);
+    }
+
+    return res.status(200).json({ 
+      available: false, 
+      message: "Username already taken",
+      suggestions 
+    });
+  } catch (error: any) {
+    console.error("Check Username Error:", error);
+    return res.status(500).json({ message: "Server error" });
+  }
+};
+
+/* =======================
+   CHECK EMAIL/PHONE DUPLICATES
+======================= */
+export const checkDuplicates = async (req: Request, res: Response) => {
+  try {
+    const { email, phone } = req.body;
+    const result: { emailExists: boolean; phoneExists: boolean } = {
+      emailExists: false,
+      phoneExists: false,
+    };
+
+    if (email) {
+      const normalizedEmail = email.toLowerCase().trim();
+      const existingEmail = await User.findOne({ email: normalizedEmail });
+      result.emailExists = !!existingEmail;
+    }
+
+    if (phone) {
+      const existingPhone = await User.findOne({ phone: phone.trim() });
+      result.phoneExists = !!existingPhone;
+    }
+
+    return res.status(200).json(result);
+  } catch (error: any) {
+    console.error("Check Duplicates Error:", error);
+    return res.status(500).json({ message: "Server error" });
+  }
+};
+
+/* =======================
+   SEND OTP TO PHONE
+   (Uses console log for development - integrate SMS gateway for production)
+======================= */
+export const sendOtp = async (req: Request, res: Response) => {
+  try {
+    const { phone, countryCode = "+91" } = req.body;
+    
+    if (!phone || !/^\d{10}$/.test(phone)) {
+      return res.status(400).json({ message: "Please provide a valid 10-digit phone number" });
+    }
+
+    const fullPhone = `${countryCode}${phone}`;
+    
+    // Generate 6-digit OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = Date.now() + 5 * 60 * 1000; // 5 minutes expiry
+
+    // Store OTP
+    otpStore.set(fullPhone, { otp, expiresAt, verified: false });
+
+    // Clean up expired OTPs periodically
+    setTimeout(() => {
+      const stored = otpStore.get(fullPhone);
+      if (stored && stored.expiresAt < Date.now()) {
+        otpStore.delete(fullPhone);
+      }
+    }, 5 * 60 * 1000);
+
+    // TODO: Integrate with SMS gateway (Twilio, MSG91, etc.)
+    // For development, log to console
+    console.log(`📱 [OTP] Sent to ${fullPhone}: ${otp}`);
+
+    // In production, send SMS here:
+    // await sendSMS(fullPhone, `Your Heed verification code is: ${otp}`);
+
+    return res.status(200).json({ 
+      message: "OTP sent successfully",
+      // Remove in production - only for testing
+      ...(process.env.NODE_ENV === 'development' && { testOtp: otp })
+    });
+  } catch (error: any) {
+    console.error("Send OTP Error:", error);
+    return res.status(500).json({ message: "Failed to send OTP" });
+  }
+};
+
+/* =======================
+   VERIFY OTP
+======================= */
+export const verifyOtp = async (req: Request, res: Response) => {
+  try {
+    const { phone, countryCode = "+91", otp } = req.body;
+    
+    if (!phone || !otp) {
+      return res.status(400).json({ message: "Phone and OTP are required" });
+    }
+
+    const fullPhone = `${countryCode}${phone}`;
+    const stored = otpStore.get(fullPhone);
+
+    if (!stored) {
+      return res.status(400).json({ message: "OTP expired or not found. Please request a new one." });
+    }
+
+    if (stored.expiresAt < Date.now()) {
+      otpStore.delete(fullPhone);
+      return res.status(400).json({ message: "OTP has expired. Please request a new one." });
+    }
+
+    if (stored.otp !== otp) {
+      return res.status(400).json({ message: "Invalid OTP. Please try again." });
+    }
+
+    // Mark as verified
+    stored.verified = true;
+    otpStore.set(fullPhone, stored);
+
+    return res.status(200).json({ 
+      message: "Phone verified successfully",
+      verified: true 
+    });
+  } catch (error: any) {
+    console.error("Verify OTP Error:", error);
+    return res.status(500).json({ message: "Verification failed" });
+  }
+};
+
 /* =======================
    REQUEST BODY TYPES
 ======================= */

@@ -4,10 +4,14 @@ import {
   login, 
   googleAuth,
   generateUploadUrl, 
-  uploadImage, // ✅ Import the new controller
-  getPrivateDocument // ✅ NEW: Get private documents
+  uploadImage,
+  getPrivateDocument,
+  checkUsername,
+  checkDuplicates,
+  sendOtp,
+  verifyOtp
 } from "../controllers/authController.js";
-import { upload } from "../middleware/upload.js"; // ✅ Import multer middleware
+import { upload } from "../middleware/upload.js";
 
 const router = express.Router();
 
@@ -18,6 +22,12 @@ router.get("/ping", (req, res) => {
     serverIp: req.hostname,
   });
 });
+
+// ✅ Validation endpoints
+router.post("/check-username", checkUsername);
+router.post("/check-duplicates", checkDuplicates);
+router.post("/send-otp", sendOtp);
+router.post("/verify-otp", verifyOtp);
 
 // ✅ New Route for Frontend Image Upload
 router.post("/upload-image", upload.single("file"), uploadImage);
