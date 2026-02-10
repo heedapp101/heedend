@@ -12,10 +12,25 @@ import { AuthRequest } from "../middleware/authMiddleware.js";
 import { INTEREST_WEIGHTS } from "../utils/interestUtils.js";
 import { interestBuffer } from "../utils/InterestBuffer.js";
 import { notifyLike } from "../utils/notificationService.js";
-import { indexPost, deletePostFromIndex } from "../services/typesenseSync.js";
 
 // Tag generation now happens asynchronously via queue system
 // No blocklist needed - Gemini is prompted for specific fashion terms
+
+const parseBooleanInput = (value: unknown): boolean | undefined => {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (value === 1) return true;
+    if (value === 0) return false;
+    return undefined;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["true", "1", "yes", "on"].includes(normalized)) return true;
+    if (["false", "0", "no", "off"].includes(normalized)) return false;
+  }
+  return undefined;
+};
 
 /* =========================
    CREATE IMAGE POST
@@ -27,6 +42,7 @@ export const createImagePost = async (req: AuthRequest, res: Response) => {
     // 1. Extract inputs
     const { title, description } = req.body;
     const priceRaw = req.body.price;
+    const quantityRaw = req.body.quantityAvailable;
     const userTagsRaw = req.body.tags;
 
     // --- Validation ---
@@ -43,6 +59,19 @@ export const createImagePost = async (req: AuthRequest, res: Response) => {
 
     if (req.user.userType === "general" && priceRaw !== undefined && priceRaw !== "") {
       return res.status(400).json({ message: "Price is only allowed for business users" });
+    }
+
+    let quantityAvailable: number | null = null;
+    let isOutOfStock = false;
+    if (req.user.userType === "business") {
+      if (quantityRaw !== undefined && quantityRaw !== null && quantityRaw !== "") {
+        const parsedQty = Number(quantityRaw);
+        if (!Number.isFinite(parsedQty) || parsedQty < 0) {
+          return res.status(400).json({ message: "Quantity available must be 0 or greater" });
+        }
+        quantityAvailable = Math.floor(parsedQty);
+        isOutOfStock = quantityAvailable === 0;
+      }
     }
 
     // --- Files ---
@@ -77,15 +106,11 @@ export const createImagePost = async (req: AuthRequest, res: Response) => {
     // ✅ STEP B: Process Images (Upload Only - Fast!)
     // ---------------------------------------------------------
     const images: { high: string; grid?: string; low: string; width?: number; height?: number }[] = [];
-    const imageBuffers: Buffer[] = []; // Store buffers for async tag generation
 
     for (const file of files) {
       const name = `${Date.now()}-${Math.random()}`;
 
       console.log(`📷 [CreatePost] Processing image: ${file.originalname}, size: ${file.buffer.length} bytes`);
-
-      // Store buffer for async tag generation
-      imageBuffers.push(file.buffer);
 
       // Try processing with Sharp, fallback to original upload if it fails
       let processed: { high: string; grid?: string; low: string; width?: number; height?: number };
@@ -130,8 +155,8 @@ export const createImagePost = async (req: AuthRequest, res: Response) => {
     // ---------------------------------------------------------
     // ✅ STEP C: Save to Database
     // ---------------------------------------------------------
-    const allowComments = req.body.allowComments === "true";
-    const allowLikes = req.body.allowLikes === "true";
+    const allowComments = parseBooleanInput(req.body.allowComments) ?? true;
+    const allowLikes = parseBooleanInput(req.body.allowLikes) ?? true;
 
     const post = await ImagePost.create({
       user: req.user._id,
@@ -140,6 +165,8 @@ export const createImagePost = async (req: AuthRequest, res: Response) => {
       allowComments,
       allowLikes,
       price: parsedPrice,
+      quantityAvailable,
+      isOutOfStock,
       images,
       tags: finalTags,
       tagGenerationStatus: "pending", // Tags will be generated asynchronously
@@ -149,26 +176,23 @@ export const createImagePost = async (req: AuthRequest, res: Response) => {
     // ✅ STEP D: Queue Tag Generation (Async - Non-blocking!)
     // ---------------------------------------------------------
     // Add to queue for background processing - upload is already complete!
-    if (imageBuffers.length > 0) {
-      // Queue the first image for tag generation (or all if you want)
+    if (images.length > 0) {
+      // Queue the first image URL for tag generation (worker will fetch the image)
       queueTagGeneration(
         post._id.toString(),
-        imageBuffers[0], // Use first image for tags
         images[0].high
       ).catch(err => {
         console.error("⚠️ Failed to queue tag generation:", err);
       });
-      
+
       console.log(`📋 Post ${post._id} queued for tag generation`);
     }
 
     const populatedPost = await ImagePost.findById(post._id)
-      .populate("user", "username userType profilePic companyName isVerified");
-
-    // ✅ Index to Typesense for fast search
-    indexPost(populatedPost!.toObject(), populatedPost!.user).catch(err => {
-      console.error("⚠️ Failed to index post to Typesense:", err);
-    });
+      .populate(
+        "user",
+        "username userType profilePic companyName isVerified requireChatBeforePurchase autoReplyEnabled autoReplyMessage customQuickQuestion inventoryAlertThreshold"
+      );
 
     return res.status(201).json({
       ...populatedPost!.toObject(),
@@ -192,7 +216,7 @@ export const getAllImagePosts = async (req: Request, res: Response) => {
     const skip = (page - 1) * limit;
 
     const posts = await ImagePost.find()
-      .populate("user", "username userType")
+      .populate("user", "username userType requireChatBeforePurchase")
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
@@ -255,7 +279,10 @@ export const getSinglePost = async (req: AuthRequest, res: Response) => {
     const source = req.query.source as string; // Track where user came from
 
     // First get the post to check if user already viewed
-    let post = await ImagePost.findById(id).populate("user", "username userType name profilePic");
+    let post = await ImagePost.findById(id).populate(
+      "user",
+      "username userType name profilePic requireChatBeforePurchase autoReplyEnabled autoReplyMessage customQuickQuestion inventoryAlertThreshold cashOnDeliveryAvailable"
+    );
     if (!post) return res.status(404).json({ message: "Not found" });
 
     // ✅ UNIQUE VIEWS: Only count view if user hasn't viewed before
@@ -271,7 +298,10 @@ export const getSinglePost = async (req: AuthRequest, res: Response) => {
         updateQuery.$addToSet = { viewedBy: userId };
       }
       post = await ImagePost.findByIdAndUpdate(id, updateQuery, { new: true })
-        .populate("user", "username userType name profilePic") as any;
+        .populate(
+          "user",
+          "username userType name profilePic requireChatBeforePurchase autoReplyEnabled autoReplyMessage customQuickQuestion inventoryAlertThreshold cashOnDeliveryAvailable"
+        ) as any;
     }
 
     if (!post) {
@@ -359,7 +389,7 @@ export const toggleLikePost = async (req: AuthRequest, res: Response) => {
     await post.save();
 
     const populated = await ImagePost.findById(post._id)
-      .populate("user", "username userType");
+      .populate("user", "username userType requireChatBeforePurchase");
 
     if (!populated) {
       return res.status(404).json({ message: "Post not found after update" });
@@ -396,7 +426,7 @@ export const getMyImagePosts = async (req: AuthRequest, res: Response) => {
     }
 
     const posts = await ImagePost.find(filter)
-      .populate("user", "username userType")
+      .populate("user", "username userType requireChatBeforePurchase")
       .sort({ createdAt: -1 });
 
     const formatted = posts.map(post => ({
@@ -426,7 +456,7 @@ export const getPostsByUser = async (req: Request, res: Response) => {
       user: userId,
       $or: [{ isArchived: false }, { isArchived: { $exists: false } }]
     })
-      .populate("user", "username userType")
+      .populate("user", "username userType requireChatBeforePurchase")
       .sort({ createdAt: -1 });
 
     const formatted = posts.map(post => ({
@@ -1687,6 +1717,128 @@ export const dontRecommendPost = async (req: AuthRequest, res: Response) => {
 };
 
 /* =========================
+   EDIT POST / INVENTORY
+========================= */
+export const updatePost = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ message: "Unauthorized" });
+
+    const { postId } = req.params;
+    const post = await ImagePost.findById(postId);
+
+    if (!post) return res.status(404).json({ message: "Post not found" });
+
+    if (post.user.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: "You can only edit your own posts" });
+    }
+
+    const {
+      title,
+      description,
+      price,
+      quantityAvailable,
+      isOutOfStock,
+      allowComments,
+      allowLikes,
+      tags,
+    } = req.body;
+
+    if (title !== undefined) {
+      if (!title || !String(title).trim()) {
+        return res.status(400).json({ message: "Title cannot be empty" });
+      }
+      post.title = String(title).trim();
+    }
+
+    if (description !== undefined) {
+      if (!description || !String(description).trim()) {
+        return res.status(400).json({ message: "Description cannot be empty" });
+      }
+      post.description = String(description).trim();
+    }
+
+    if (price !== undefined) {
+      if (req.user.userType !== "business") {
+        return res.status(400).json({ message: "Only business users can set price" });
+      }
+      if (price === null || price === "") {
+        post.price = undefined;
+      } else {
+        const parsed = Number(price);
+        if (!Number.isFinite(parsed) || parsed < 0) {
+          return res.status(400).json({ message: "Price must be 0 or greater" });
+        }
+        post.price = parsed;
+      }
+    }
+
+    if (allowComments !== undefined) {
+      const parsedAllowComments = parseBooleanInput(allowComments);
+      if (parsedAllowComments === undefined) {
+        return res.status(400).json({ message: "allowComments must be true or false" });
+      }
+      post.allowComments = parsedAllowComments;
+    }
+
+    if (allowLikes !== undefined) {
+      const parsedAllowLikes = parseBooleanInput(allowLikes);
+      if (parsedAllowLikes === undefined) {
+        return res.status(400).json({ message: "allowLikes must be true or false" });
+      }
+      post.allowLikes = parsedAllowLikes;
+    }
+
+    if (tags !== undefined) {
+      const inputTags = Array.isArray(tags) ? tags : [tags];
+      post.tags = inputTags
+        .map((t: any) => String(t || "").trim().toLowerCase())
+        .filter(Boolean);
+    }
+
+    if (quantityAvailable !== undefined) {
+      if (req.user.userType !== "business") {
+        return res.status(400).json({ message: "Only business users can manage quantity" });
+      }
+      if (quantityAvailable === null || quantityAvailable === "") {
+        (post as any).quantityAvailable = null;
+        (post as any).isOutOfStock = false;
+      } else {
+        const parsedQty = Number(quantityAvailable);
+        if (!Number.isFinite(parsedQty) || parsedQty < 0) {
+          return res.status(400).json({ message: "Quantity must be 0 or greater" });
+        }
+        (post as any).quantityAvailable = Math.floor(parsedQty);
+        (post as any).isOutOfStock = (post as any).quantityAvailable === 0;
+      }
+    }
+
+    if (isOutOfStock !== undefined && (post as any).quantityAvailable === null) {
+      const parsedIsOutOfStock = parseBooleanInput(isOutOfStock);
+      if (parsedIsOutOfStock === undefined) {
+        return res.status(400).json({ message: "isOutOfStock must be true or false" });
+      }
+      (post as any).isOutOfStock = parsedIsOutOfStock;
+    }
+
+    await post.save();
+
+    const populatedPost = await ImagePost.findById(post._id).populate(
+      "user",
+      "username userType profilePic companyName isVerified requireChatBeforePurchase autoReplyEnabled autoReplyMessage customQuickQuestion inventoryAlertThreshold"
+    );
+
+    return res.json({
+      ...populatedPost!.toObject(),
+      likes: populatedPost?.likedBy?.length || 0,
+      message: "Post updated successfully",
+    });
+  } catch (err) {
+    console.error("Update Post Error:", err);
+    return res.status(500).json({ message: "Failed to update post" });
+  }
+};
+
+/* =========================
    DELETE POST
 ========================= */
 export const deletePost = async (req: AuthRequest, res: Response) => {
@@ -1719,11 +1871,6 @@ export const deletePost = async (req: AuthRequest, res: Response) => {
     // Delete the post
     await ImagePost.findByIdAndDelete(postId);
 
-    // ✅ Remove from Typesense index
-    deletePostFromIndex(postId).catch(err => {
-      console.error("⚠️ Failed to remove post from Typesense:", err);
-    });
-
     res.json({ success: true, message: "Post deleted successfully" });
   } catch (err) {
     console.error("Delete Post Error:", err);
@@ -1755,13 +1902,6 @@ export const archivePost = async (req: AuthRequest, res: Response) => {
     post.archivedAt = newArchivedStatus ? new Date() : undefined;
     await post.save();
 
-    // ✅ Update Typesense index (archived posts are filtered out)
-    const populatedPost = await ImagePost.findById(postId)
-      .populate("user", "username userType profilePic companyName isVerified");
-    indexPost(populatedPost!.toObject(), populatedPost!.user).catch(err => {
-      console.error("⚠️ Failed to update Typesense index:", err);
-    });
-
     res.json({ 
       success: true, 
       isArchived: post.isArchived,
@@ -1781,7 +1921,7 @@ export const getMyArchivedPosts = async (req: AuthRequest, res: Response) => {
     if (!req.user) return res.status(401).json({ message: "Unauthorized" });
 
     const posts = await ImagePost.find({ user: req.user._id, isArchived: true })
-      .populate("user", "username userType")
+      .populate("user", "username userType requireChatBeforePurchase")
       .sort({ archivedAt: -1 });
 
     const formatted = posts.map(post => ({

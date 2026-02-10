@@ -32,6 +32,11 @@ router.get("/unread", getUnreadCount);
 // Get or create chat with another user
 router.post("/create", getOrCreateChat);
 
+// --- Admin Routes ---
+// Keep these before dynamic :chatId routes
+router.get("/admin/all", adminMiddleware, adminGetAllChats);
+router.post("/admin/initiate", adminMiddleware, adminInitiateChat);
+
 // Get single chat with messages
 router.get("/:chatId", getChatById);
 
@@ -46,9 +51,5 @@ router.put("/:chatId/read", markMessagesRead);
 
 // Delete (soft) a chat
 router.delete("/:chatId", deleteChat);
-
-// --- Admin Routes ---
-router.get("/admin/all", adminMiddleware, adminGetAllChats);
-router.post("/admin/initiate", adminMiddleware, adminInitiateChat);
 
 export default router;

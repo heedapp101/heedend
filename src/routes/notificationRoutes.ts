@@ -26,10 +26,11 @@ router.patch("/:id/read", markNotificationAsRead);
 // Mark all as read
 router.patch("/read-all", markAllNotificationsAsRead);
 
+// Clear all notifications
+// Keep static route before dynamic :id route
+router.delete("/clear-all", clearAllNotifications);
+
 // Delete single notification
 router.delete("/:id", deleteNotification);
-
-// Clear all notifications
-router.delete("/clear-all", clearAllNotifications);
 
 export default router;

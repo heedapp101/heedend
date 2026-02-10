@@ -10,12 +10,6 @@ import {
   getReportedPosts,
   updateReportStatus,
   deleteReportedPost,
-  // Typesense sync endpoints
-  getTypesenseStatus,
-  typesenseFullSync,
-  typesenseSyncPosts,
-  typesenseSyncUsers,
-  typesenseSyncTags,
 } from "../controllers/adminController.js";
 import { requireAuth } from "../middleware/authMiddleware.js";
 import { adminMiddleware } from "../middleware/roleMiddleware.js";
@@ -35,12 +29,5 @@ router.delete("/reject/:id", requireAuth, adminMiddleware, rejectUser);
 router.get("/reports", requireAuth, adminMiddleware, getReportedPosts);
 router.put("/reports/:reportId", requireAuth, adminMiddleware, updateReportStatus);
 router.delete("/reports/post/:postId", requireAuth, adminMiddleware, deleteReportedPost);
-
-// ✅ TYPESENSE: Search index management
-router.get("/typesense/status", requireAuth, adminMiddleware, getTypesenseStatus);
-router.post("/typesense/sync", requireAuth, adminMiddleware, typesenseFullSync);
-router.post("/typesense/sync/posts", requireAuth, adminMiddleware, typesenseSyncPosts);
-router.post("/typesense/sync/users", requireAuth, adminMiddleware, typesenseSyncUsers);
-router.post("/typesense/sync/tags", requireAuth, adminMiddleware, typesenseSyncTags);
 
 export default router;

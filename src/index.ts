@@ -10,7 +10,6 @@ import { createServer } from "http";
 import { connectDB } from "./config/db.js";
 import { initializeSocket } from "./socket/socketHandler.js";
 import { initializeTagWorker } from "./workers/tagWorker.js"; // ✅ Tag Worker
-import { initializeTypesense } from "./services/typesenseSync.js"; // ✅ Typesense Search
 
 // Routes Imports
 import authRoutes from "./routes/authRoutes.js";
@@ -58,7 +57,9 @@ const httpServer = createServer(app);
 app.set("trust proxy", 1);
 
 // Initialize Socket.io
-initializeSocket(httpServer);
+initializeSocket(httpServer).catch((error) => {
+  console.error("Socket initialization failed:", error);
+});
 
 // ==========================================
 // ✅ UNCAUGHT EXCEPTION HANDLERS
@@ -189,12 +190,4 @@ httpServer.listen(PORT, "0.0.0.0", () => {
   // ✅ Initialize background tag generation worker
   initializeTagWorker();
   
-  // ✅ Initialize Typesense search (non-blocking, with fallback)
-  initializeTypesense().then((available) => {
-    if (available) {
-      console.log("✅ Typesense search engine ready (~5ms searches)");
-    } else {
-      console.log("ℹ️ Using MongoDB for search (configure TYPESENSE_* env vars for faster search)");
-    }
-  });
 });

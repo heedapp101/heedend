@@ -1,8 +1,13 @@
 import { Request, Response } from "express";
-import { Chat, IChat, IMessage } from "../models/Chat.js";
+import { Chat } from "../models/Chat.js";
+import Message, { IMessage } from "../models/Message.js";
 import User from "../models/User.js";
 import { Types } from "mongoose";
 import { AuthRequest } from "../middleware/authMiddleware.js";
+import {
+  emitChatNotificationToUsers,
+  emitMessageToChat,
+} from "../socket/socketHandler.js";
 
 // --- Default Questions for Product Inquiries ---
 export const DEFAULT_PRODUCT_QUESTIONS = [
@@ -15,6 +20,69 @@ export const DEFAULT_PRODUCT_QUESTIONS = [
   "What's the delivery time?",
   "Is COD available?",
 ];
+
+const toIdString = (value: any): string => {
+  if (!value) return "";
+  if (typeof value === "string") return value;
+  if (typeof value?.toString === "function") return value.toString();
+  return String(value);
+};
+
+const clampNumber = (value: number, min: number, max: number) =>
+  Math.max(min, Math.min(max, value));
+
+const normalizeInquiryForSocket = (inquiry: any) => {
+  if (!inquiry) return null;
+  return {
+    ...inquiry,
+    _id: toIdString(inquiry._id),
+    firstMessageId: inquiry.firstMessageId ? toIdString(inquiry.firstMessageId) : undefined,
+    product: inquiry.product
+      ? {
+          ...inquiry.product,
+          postId: toIdString(inquiry.product.postId),
+        }
+      : inquiry.product,
+  };
+};
+
+const normalizeMessageForSocket = (message: any, senderId: string) => ({
+  ...message,
+  _id: toIdString(message?._id),
+  sender: { _id: senderId },
+  inquiryId: message?.inquiryId ? toIdString(message.inquiryId) : undefined,
+  product: message?.product
+    ? {
+        ...message.product,
+        postId: toIdString(message.product.postId),
+      }
+    : message?.product,
+});
+
+const emitRealtimeChatEvent = (
+  chat: any,
+  senderId: string,
+  message: any,
+  activeInquiry?: any
+) => {
+  const chatId = toIdString(chat?._id);
+  if (!chatId) return;
+
+  const payload = {
+    chatId,
+    message: normalizeMessageForSocket(message, senderId),
+    activeInquiry: normalizeInquiryForSocket(activeInquiry) || null,
+  };
+
+  emitMessageToChat(chatId, payload);
+
+  const participants = (chat?.participants || []).map((p: any) => toIdString(p));
+  emitChatNotificationToUsers(participants, senderId, {
+    chatId,
+    message: payload.message,
+    from: senderId,
+  });
+};
 
 // --- Get or Create Chat ---
 export const getOrCreateChat = async (req: AuthRequest, res: Response) => {
@@ -56,7 +124,6 @@ export const getOrCreateChat = async (req: AuthRequest, res: Response) => {
         participants: [userId, recipientId],
         chatType,
         productContext: productContext || undefined,
-        messages: [],
         isActive: true,
       });
       await chat.save();
@@ -103,11 +170,32 @@ export const getUserChats = async (req: AuthRequest, res: Response) => {
       .populate("lastMessage.sender", "username name")
       .sort({ "lastMessage.createdAt": -1, updatedAt: -1 });
 
+    const chatIds = chats.map((chat) => chat._id);
+    const unreadMap = new Map<string, number>();
+    if (chatIds.length > 0) {
+      const unreadCounts = await Message.aggregate([
+        {
+          $match: {
+            chat: { $in: chatIds },
+            isRead: false,
+            sender: { $ne: userId },
+          },
+        },
+        {
+          $group: {
+            _id: "$chat",
+            count: { $sum: 1 },
+          },
+        },
+      ]);
+      unreadCounts.forEach((entry) => {
+        unreadMap.set(String(entry._id), entry.count);
+      });
+    }
+
     // Add unread count and format response
     const formattedChats = chats.map((chat) => {
-      const unreadCount = chat.messages.filter(
-        (msg) => !msg.isRead && msg.sender.toString() !== userId?.toString()
-      ).length;
+      const unreadCount = unreadMap.get(chat._id.toString()) || 0;
 
       // Get the other participant
       const otherParticipant = chat.participants.find(
@@ -137,10 +225,12 @@ export const getChatById = async (req: AuthRequest, res: Response) => {
   try {
     const { chatId } = req.params;
     const userId = req.user?._id;
+    const page = clampNumber(parseInt(req.query.page as string) || 1, 1, 1000);
+    const limit = clampNumber(parseInt(req.query.limit as string) || 50, 1, 100);
+    const skip = (page - 1) * limit;
 
     const chat = await Chat.findById(chatId)
-      .populate("participants", "username name profilePic userType isVerified companyName phone")
-      .populate("messages.sender", "username name profilePic");
+      .populate("participants", "username name profilePic userType isVerified companyName phone");
 
     if (!chat) {
       return res.status(404).json({ message: "Chat not found" });
@@ -156,15 +246,63 @@ export const getChatById = async (req: AuthRequest, res: Response) => {
       return res.status(403).json({ message: "Not authorized to view this chat" });
     }
 
-    // Mark messages as read
-    chat.messages.forEach((msg) => {
-      if (msg.sender.toString() !== userId?.toString() && !msg.isRead) {
-        msg.isRead = true;
+    const messageExists = await Message.exists({ chat: chat._id });
+    if (!messageExists) {
+      try {
+        const legacyChat = await Chat.findById(chatId).select("+messages");
+        const legacyMessages = (legacyChat as any)?.messages || [];
+        if (legacyMessages.length > 0) {
+          const migrated = legacyMessages.map((msg: any) => ({
+            _id: msg._id || new Types.ObjectId(),
+            chat: legacyChat?._id,
+            sender: msg.sender,
+            content: msg.content,
+            messageType: msg.messageType,
+            product: msg.product,
+            inquiryId: msg.inquiryId,
+            replyTo: msg.replyTo,
+            paymentRequest: msg.paymentRequest,
+            orderUpdate: msg.orderUpdate,
+            deliveryConfirmation: msg.deliveryConfirmation,
+            isRead: msg.isRead ?? false,
+            createdAt: msg.createdAt || new Date(),
+            updatedAt: msg.updatedAt || msg.createdAt || new Date(),
+          }));
+          await Message.insertMany(migrated, { ordered: false });
+          legacyChat!.messages = [];
+          await legacyChat!.save();
+        }
+      } catch (migrationError) {
+        console.warn("Legacy chat migration failed:", migrationError);
       }
-    });
-    await chat.save();
+    }
 
-    return res.status(200).json(chat);
+    const [messages, totalMessages] = await Promise.all([
+      Message.find({ chat: chat._id })
+        .select("-chat")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate("sender", "username name profilePic")
+        .lean(),
+      Message.countDocuments({ chat: chat._id }),
+    ]);
+
+    await Message.updateMany(
+      { chat: chat._id, sender: { $ne: userId }, isRead: false },
+      { $set: { isRead: true } }
+    );
+
+    return res.status(200).json({
+      ...chat.toObject(),
+      messages: messages.reverse(),
+      pagination: {
+        page,
+        limit,
+        total: totalMessages,
+        pages: Math.ceil(totalMessages / limit),
+      },
+    });
   } catch (error) {
     console.error("Error in getChatById:", error);
     return res.status(500).json({ message: "Server error" });
@@ -198,7 +336,10 @@ export const sendMessage = async (req: AuthRequest, res: Response) => {
     }
 
     // Create message
+    const senderMessageId = new Types.ObjectId();
     const newMessage: IMessage = {
+      _id: senderMessageId,
+      chat: chat._id,
       sender: new Types.ObjectId(userId),
       content,
       messageType,
@@ -206,12 +347,12 @@ export const sendMessage = async (req: AuthRequest, res: Response) => {
       paymentRequest: messageType === "payment-request" ? paymentRequest : undefined,
       isRead: false,
       createdAt: new Date(),
-    };
+    } as IMessage;
 
-    chat.messages.push(newMessage);
+    const savedMessageDoc = await Message.create(newMessage);
     chat.lastMessage = {
       content: messageType === "product"
-        ? `📦 ${product?.title || "Product"}`
+        ? `Product: ${product?.title || "Product"}`
         : messageType === "image"
           ? "Photo"
           : content,
@@ -220,9 +361,69 @@ export const sendMessage = async (req: AuthRequest, res: Response) => {
     };
 
     await chat.save();
+    const activeInquiry =
+      chat.activeInquiryId
+        ? chat.inquiries.find((i) => toIdString(i._id) === toIdString(chat.activeInquiryId))
+        : null;
+    emitRealtimeChatEvent(chat, toIdString(userId), savedMessageDoc.toObject(), activeInquiry);
 
-    // Get the saved message (last one in array)
-    const savedMessage = chat.messages[chat.messages.length - 1];
+    // Optional business auto-reply when buyer sends the first/manual message
+    try {
+      const recipientIds = chat.participants
+        .map((p) => p.toString())
+        .filter((id) => id !== userId?.toString());
+
+      const businessRecipient = await User.findOne({
+        _id: { $in: recipientIds },
+        userType: "business",
+        autoReplyEnabled: true,
+      }).select("autoReplyEnabled autoReplyMessage");
+
+      if (businessRecipient && req.user?.userType !== "business") {
+        const autoReplyText =
+          businessRecipient.autoReplyMessage?.trim() ||
+          "Thanks for your message. We will reply soon.";
+
+        const now = Date.now();
+        const recentlySentSameReply = await Message.findOne({
+          chat: chat._id,
+          sender: businessRecipient._id,
+          content: autoReplyText,
+        })
+          .sort({ createdAt: -1 })
+          .lean();
+
+        if (!recentlySentSameReply || now - new Date(recentlySentSameReply.createdAt).getTime() >= 90 * 1000) {
+          const autoReplyMessage: IMessage = {
+            chat: chat._id,
+            sender: new Types.ObjectId(businessRecipient._id),
+            content: autoReplyText,
+            messageType: "text",
+            isRead: false,
+            createdAt: new Date(),
+          } as IMessage;
+
+          const savedAutoReply = await Message.create(autoReplyMessage);
+          chat.lastMessage = {
+            content: autoReplyText,
+            sender: new Types.ObjectId(businessRecipient._id),
+            createdAt: new Date(),
+          };
+          await chat.save();
+          emitRealtimeChatEvent(
+            chat,
+            businessRecipient._id.toString(),
+            savedAutoReply.toObject(),
+            activeInquiry
+          );
+        }
+      }
+    } catch (autoReplyError) {
+      console.error("Auto-reply error:", autoReplyError);
+    }
+
+    // Return the sender message even if an auto-reply was appended after it.
+    const savedMessage = savedMessageDoc.toObject();
 
     return res.status(201).json({
       message: savedMessage,
@@ -236,7 +437,25 @@ export const sendMessage = async (req: AuthRequest, res: Response) => {
 
 // --- Get Default Questions ---
 export const getDefaultQuestions = async (req: Request, res: Response) => {
-  return res.status(200).json(DEFAULT_PRODUCT_QUESTIONS);
+  try {
+    const recipientId = req.query.recipientId as string | undefined;
+    if (!recipientId) {
+      return res.status(200).json(DEFAULT_PRODUCT_QUESTIONS);
+    }
+
+    const recipient = await User.findById(recipientId).select("customQuickQuestion");
+    const customQuestion = recipient?.customQuickQuestion?.trim();
+
+    if (!customQuestion) {
+      return res.status(200).json(DEFAULT_PRODUCT_QUESTIONS);
+    }
+
+    const merged = [customQuestion, ...DEFAULT_PRODUCT_QUESTIONS.filter(q => q !== customQuestion)];
+    return res.status(200).json(merged);
+  } catch (error) {
+    console.error("Get default questions error:", error);
+    return res.status(200).json(DEFAULT_PRODUCT_QUESTIONS);
+  }
 };
 
 // --- Delete Chat (Soft Delete) ---
@@ -322,7 +541,6 @@ export const adminInitiateChat = async (req: AuthRequest, res: Response) => {
       chat = new Chat({
         participants: [adminId, userId],
         chatType: "admin",
-        messages: [],
         isActive: true,
       });
       await chat.save();
@@ -351,18 +569,10 @@ export const markMessagesRead = async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ message: "Chat not found" });
     }
 
-    // Mark all messages from other users as read
-    let updated = false;
-    chat.messages.forEach((msg) => {
-      if (msg.sender.toString() !== userId?.toString() && !msg.isRead) {
-        msg.isRead = true;
-        updated = true;
-      }
-    });
-
-    if (updated) {
-      await chat.save();
-    }
+    await Message.updateMany(
+      { chat: chatId, sender: { $ne: userId }, isRead: false },
+      { $set: { isRead: true } }
+    );
 
     return res.status(200).json({ message: "Messages marked as read" });
   } catch (error) {
@@ -379,18 +589,38 @@ export const getUnreadCount = async (req: AuthRequest, res: Response) => {
     const chats = await Chat.find({
       participants: userId,
       isActive: true,
-    });
+    }).select("_id chatType");
 
     let totalUnread = 0;
     let businessUnread = 0;
     let generalUnread = 0;
     let adminUnread = 0;
 
-    chats.forEach((chat) => {
-      const unread = chat.messages.filter(
-        (msg) => !msg.isRead && msg.sender.toString() !== userId?.toString()
-      ).length;
+    const chatIds = chats.map((chat) => chat._id);
+    const unreadMap = new Map<string, number>();
+    if (chatIds.length > 0) {
+      const unreadCounts = await Message.aggregate([
+        {
+          $match: {
+            chat: { $in: chatIds },
+            isRead: false,
+            sender: { $ne: userId },
+          },
+        },
+        {
+          $group: {
+            _id: "$chat",
+            count: { $sum: 1 },
+          },
+        },
+      ]);
+      unreadCounts.forEach((entry) => {
+        unreadMap.set(String(entry._id), entry.count);
+      });
+    }
 
+    chats.forEach((chat) => {
+      const unread = unreadMap.get(chat._id.toString()) || 0;
       totalUnread += unread;
 
       if (chat.chatType === "business") businessUnread += unread;
@@ -423,12 +653,19 @@ export const sendOfferPrice = async (req: AuthRequest, res: Response) => {
       return res.status(403).json({ message: "Only business users can send offers" });
     }
 
-    if (!offerPrice || offerPrice <= 0) {
+    const normalizedOfferPrice = Number(offerPrice);
+    if (!Number.isFinite(normalizedOfferPrice) || normalizedOfferPrice <= 0) {
       return res.status(400).json({ message: "Valid offer price required" });
     }
 
     if (!product || !product.postId || !product.title) {
       return res.status(400).json({ message: "Product information required" });
+    }
+    if (!Types.ObjectId.isValid(String(product.postId))) {
+      return res.status(400).json({ message: "Invalid product post ID" });
+    }
+    if (inquiryId && !Types.ObjectId.isValid(String(inquiryId))) {
+      return res.status(400).json({ message: "Invalid inquiry ID" });
     }
 
     const chat = await Chat.findById(chatId);
@@ -450,24 +687,24 @@ export const sendOfferPrice = async (req: AuthRequest, res: Response) => {
     const offerProduct = {
       postId: new Types.ObjectId(product.postId),
       title: product.title,
-      price: offerPrice,
+      price: normalizedOfferPrice,
       image: product.image || "",
     };
 
     // Create offer message
     const newMessage: IMessage = {
+      _id: new Types.ObjectId(),
+      chat: chat._id,
       sender: new Types.ObjectId(userId),
-      content: `Offer price: ₹${offerPrice.toLocaleString("en-IN")}`,
+      content: `Offer price: Rs ${normalizedOfferPrice.toLocaleString("en-IN")}`,
       messageType: "product",
       product: offerProduct,
       inquiryId: inquiryId ? new Types.ObjectId(inquiryId) : chat.activeInquiryId,
       isRead: false,
       createdAt: new Date(),
-    };
-
-    chat.messages.push(newMessage);
+    } as IMessage;
     chat.lastMessage = {
-      content: `💰 Offer: ₹${offerPrice.toLocaleString("en-IN")}`,
+      content: `Offer: Rs ${normalizedOfferPrice.toLocaleString("en-IN")}`,
       sender: new Types.ObjectId(userId),
       createdAt: new Date(),
     };
@@ -483,10 +720,16 @@ export const sendOfferPrice = async (req: AuthRequest, res: Response) => {
       }
     }
 
+    const savedMessageDoc = await Message.create(newMessage);
     await chat.save();
 
     // Get the saved message
-    const savedMessage = chat.messages[chat.messages.length - 1];
+    const savedMessage = savedMessageDoc.toObject();
+    const activeInquiry =
+      chat.activeInquiryId
+        ? chat.inquiries.find((i) => toIdString(i._id) === toIdString(chat.activeInquiryId))
+        : null;
+    emitRealtimeChatEvent(chat, toIdString(userId), savedMessage, activeInquiry);
 
     return res.status(201).json({
       success: true,
@@ -498,3 +741,5 @@ export const sendOfferPrice = async (req: AuthRequest, res: Response) => {
     return res.status(500).json({ message: "Server error" });
   }
 };
+
+

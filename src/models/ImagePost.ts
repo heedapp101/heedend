@@ -17,6 +17,8 @@ const imagePostSchema = new Schema(
     title: { type: String, required: true },
     description: { type: String, required: true },
     price: { type: Number, min: 0 },
+    quantityAvailable: { type: Number, min: 0, default: null },
+    isOutOfStock: { type: Boolean, default: false },
     
     allowComments: { type: Boolean, default: true },
     allowLikes: { type: Boolean, default: true },
@@ -59,6 +61,7 @@ const imagePostSchema = new Schema(
 // ✅ Indexes for faster feed/search queries
 imagePostSchema.index({ tags: 1 });
 imagePostSchema.index({ createdAt: -1 });
+imagePostSchema.index({ isOutOfStock: 1, quantityAvailable: 1 });
 
 // ✅ TEXT INDEX: For optimized full-text search (like big apps)
 // MongoDB text index supports stemming, stop words, and relevance scoring

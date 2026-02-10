@@ -6,7 +6,6 @@ import User from "../models/User.js";
 import { getPresignedUrl } from "../cloudflare.js";
 import { uploadFile, s3 } from "../utils/cloudflareR2.js";
 import { processImage } from "../utils/ProcessImage.js";
-import { indexUser } from "../services/typesenseSync.js";
 
 // In-memory OTP store (use Redis in production)
 const otpStore = new Map<string, { otp: string; expiresAt: number; verified: boolean }>();
@@ -209,8 +208,8 @@ interface SignupRequestBody {
   address?: string;
   country?: string;
   
-  // ID Proof (One of: GST, PAN, Aadhaar, Driving License)
-  idProofType?: 'GST' | 'PAN' | 'Aadhaar' | 'Driving License';
+  // ID Proof (One of: GST, PAN, Aadhaar)
+  idProofType?: 'GST' | 'PAN' | 'Aadhaar';
   idProofNumber?: string;
   idProofUrl?: string;
   
@@ -220,6 +219,11 @@ interface SignupRequestBody {
   allIndiaDelivery?: boolean;
   freeShipping?: boolean;
   returnPolicy?: string;
+  requireChatBeforePurchase?: boolean;
+  autoReplyEnabled?: boolean;
+  autoReplyMessage?: string;
+  customQuickQuestion?: string;
+  inventoryAlertThreshold?: number;
 }
 
 interface LoginRequestBody {
@@ -284,6 +288,11 @@ export const signup = async (
       allIndiaDelivery,
       freeShipping,
       returnPolicy,
+      requireChatBeforePurchase,
+      autoReplyEnabled,
+      autoReplyMessage,
+      customQuickQuestion,
+      inventoryAlertThreshold,
     } = req.body;
 
     // 🔒 SECURITY: Block admin account creation via API (runtime check for raw requests)
@@ -339,7 +348,7 @@ export const signup = async (
       address: userType === "business" ? address : undefined,
       country: userType === "business" ? country : undefined,
       
-      // ID Proof (One of: GST, PAN, Aadhaar, Driving License)
+      // ID Proof (One of: GST, PAN, Aadhaar)
       idProofType: userType === "business" ? idProofType : undefined,
       idProofNumber: userType === "business" ? idProofNumber : undefined,
       idProofUrl: userType === "business" ? idProofUrl : undefined,
@@ -350,14 +359,16 @@ export const signup = async (
       allIndiaDelivery: userType === "business" ? allIndiaDelivery : false,
       freeShipping: userType === "business" ? freeShipping : false,
       returnPolicy: userType === "business" ? returnPolicy : undefined,
+      requireChatBeforePurchase: userType === "business" ? requireChatBeforePurchase !== false : true,
+      autoReplyEnabled: userType === "business" ? !!autoReplyEnabled : false,
+      autoReplyMessage: userType === "business" ? autoReplyMessage : undefined,
+      customQuickQuestion: userType === "business" ? customQuickQuestion : undefined,
+      inventoryAlertThreshold: userType === "business"
+        ? (inventoryAlertThreshold && Number(inventoryAlertThreshold) > 0 ? Number(inventoryAlertThreshold) : 3)
+        : 3,
     });
 
     await newUser.save();
-
-    // ✅ Index to Typesense for fast search
-    indexUser(newUser.toObject()).catch(err => {
-      console.error("⚠️ Failed to index user to Typesense:", err);
-    });
 
     // 5. Generate Token
     const token = jwt.sign(
@@ -394,6 +405,11 @@ export const signup = async (
         freeShipping: newUser.freeShipping,
         returnPolicy: newUser.returnPolicy,
         idProofType: newUser.idProofType,
+        requireChatBeforePurchase: newUser.requireChatBeforePurchase,
+        autoReplyEnabled: newUser.autoReplyEnabled,
+        autoReplyMessage: newUser.autoReplyMessage,
+        customQuickQuestion: newUser.customQuickQuestion,
+        inventoryAlertThreshold: newUser.inventoryAlertThreshold,
       },
     });
   } catch (error: any) {
@@ -533,6 +549,11 @@ export const login = async (
         location: user.location,
         interests: user.interests,
         companyName: user.companyName,
+        requireChatBeforePurchase: user.requireChatBeforePurchase,
+        autoReplyEnabled: user.autoReplyEnabled,
+        autoReplyMessage: user.autoReplyMessage,
+        customQuickQuestion: user.customQuickQuestion,
+        inventoryAlertThreshold: user.inventoryAlertThreshold,
       },
     });
   } catch (error: any) {
@@ -682,10 +703,6 @@ export const googleAuth = async (
 
       await user.save();
 
-      // Index to Typesense
-      indexUser(user.toObject()).catch(err => {
-        console.error("⚠️ Failed to index user to Typesense:", err);
-      });
     }
 
     // Generate token
@@ -716,6 +733,11 @@ export const googleAuth = async (
         location: user.location,
         interests: user.interests,
         companyName: user.companyName,
+        requireChatBeforePurchase: user.requireChatBeforePurchase,
+        autoReplyEnabled: user.autoReplyEnabled,
+        autoReplyMessage: user.autoReplyMessage,
+        customQuickQuestion: user.customQuickQuestion,
+        inventoryAlertThreshold: user.inventoryAlertThreshold,
       },
     });
   } catch (error: any) {

@@ -116,8 +116,22 @@ export const deleteComment = async (req: AuthRequest, res: Response) => {
       return res.status(403).json({ message: "Access denied" });
     }
 
-    await comment.deleteOne();
-    res.json({ message: "Deleted successfully" });
+    const idsToDelete: mongoose.Types.ObjectId[] = [comment._id as mongoose.Types.ObjectId];
+    for (let i = 0; i < idsToDelete.length; i++) {
+      const childComments = await Comment.find({ parentId: idsToDelete[i] })
+        .select("_id")
+        .lean();
+
+      for (const child of childComments) {
+        const childId = child._id as mongoose.Types.ObjectId;
+        if (!idsToDelete.some((id) => id.equals(childId))) {
+          idsToDelete.push(childId);
+        }
+      }
+    }
+
+    await Comment.deleteMany({ _id: { $in: idsToDelete } });
+    res.json({ message: "Deleted successfully", deletedCount: idsToDelete.length });
 
   } catch (err) {
     res.status(500).json({ message: "Error deleting comment" });

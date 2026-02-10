@@ -1,7 +1,6 @@
 import { Expo, ExpoPushMessage, ExpoPushTicket } from 'expo-server-sdk';
 import User from '../models/User.js';
 
-// Create a new Expo SDK client
 const expo = new Expo();
 
 interface PushNotificationData {
@@ -12,28 +11,118 @@ interface PushNotificationData {
   sound?: 'default' | null;
 }
 
-// Send push notification to a specific user
+async function removePushTokensForUser(userId: string, pushTokens: string[]): Promise<void> {
+  if (!pushTokens.length) return;
+
+  try {
+    await User.updateOne(
+      { _id: userId },
+      { $pull: { pushTokens: { token: { $in: pushTokens } } } }
+    );
+  } catch (error) {
+    console.error('Failed to remove invalid push tokens for user:', userId, error);
+  }
+}
+
+async function removePushTokensEverywhere(pushTokens: string[]): Promise<void> {
+  if (!pushTokens.length) return;
+
+  try {
+    await User.updateMany(
+      { 'pushTokens.token': { $in: pushTokens } },
+      { $pull: { pushTokens: { token: { $in: pushTokens } } } }
+    );
+  } catch (error) {
+    console.error('Failed to remove invalid push tokens globally:', error);
+  }
+}
+
+async function handleTickets(
+  tickets: ExpoPushTicket[],
+  chunkTokens: string[],
+  userId: string,
+  receiptIdToToken: Record<string, string>
+): Promise<void> {
+  const deviceNotRegisteredTokens = new Set<string>();
+
+  tickets.forEach((ticket, index) => {
+    const token = chunkTokens[index];
+    if (!token) return;
+
+    if (ticket.status === 'ok') {
+      if (ticket.id) {
+        receiptIdToToken[ticket.id] = token;
+      }
+      return;
+    }
+
+    console.error(`Expo ticket error for user ${userId}:`, ticket.message, ticket.details);
+    const ticketError = (ticket.details as { error?: string } | undefined)?.error;
+    if (ticketError === 'DeviceNotRegistered') {
+      deviceNotRegisteredTokens.add(token);
+    }
+  });
+
+  if (deviceNotRegisteredTokens.size > 0) {
+    await removePushTokensEverywhere(Array.from(deviceNotRegisteredTokens));
+  }
+}
+
+async function handleReceipts(receiptIdToToken: Record<string, string>): Promise<void> {
+  const receiptIds = Object.keys(receiptIdToToken);
+  if (!receiptIds.length) return;
+
+  const receiptIdChunks = expo.chunkPushNotificationReceiptIds(receiptIds);
+  const deviceNotRegisteredTokens = new Set<string>();
+
+  for (const receiptIdChunk of receiptIdChunks) {
+    try {
+      const receipts = await expo.getPushNotificationReceiptsAsync(receiptIdChunk);
+      for (const receiptId of Object.keys(receipts)) {
+        const receipt = receipts[receiptId];
+        if (receipt.status !== 'error') continue;
+
+        const token = receiptIdToToken[receiptId];
+        console.error('Expo receipt error:', receipt.message, receipt.details);
+
+        const receiptError = (receipt.details as { error?: string } | undefined)?.error;
+        if (receiptError === 'DeviceNotRegistered' && token) {
+          deviceNotRegisteredTokens.add(token);
+        }
+      }
+    } catch (error) {
+      console.error('Error fetching Expo push receipts:', error);
+    }
+  }
+
+  if (deviceNotRegisteredTokens.size > 0) {
+    await removePushTokensEverywhere(Array.from(deviceNotRegisteredTokens));
+  }
+}
+
 export async function sendPushNotificationToUser(
-  userId: string, 
+  userId: string,
   notification: PushNotificationData
 ): Promise<void> {
   try {
     const user = await User.findById(userId).select('pushTokens');
-    
+
     if (!user || !user.pushTokens || user.pushTokens.length === 0) {
-      console.log(`No push tokens found for user ${userId}`);
       return;
     }
 
-    // Build messages for all tokens
     const messages: ExpoPushMessage[] = [];
-    
+    const tokensForMessages: string[] = [];
+    const invalidTokens: string[] = [];
+    const seenTokens = new Set<string>();
+
     for (const tokenData of user.pushTokens) {
-      const pushToken = tokenData.token;
-      
-      // Validate token format
+      const pushToken = String(tokenData?.token || '').trim();
+      if (!pushToken || seenTokens.has(pushToken)) continue;
+
+      seenTokens.add(pushToken);
       if (!Expo.isExpoPushToken(pushToken)) {
-        console.warn(`Invalid Expo push token: ${pushToken}`);
+        invalidTokens.push(pushToken);
         continue;
       }
 
@@ -45,78 +134,56 @@ export async function sendPushNotificationToUser(
         badge: notification.badge,
         sound: notification.sound || 'default',
         priority: 'high',
-        // Android-specific: specify channel ID for proper notification handling
-        channelId: notification.data?.type === 'chat' || notification.data?.type === 'message' 
-          ? 'messages' 
-          : notification.data?.type?.startsWith('order_') 
-            ? 'orders' 
-            : 'default',
+        channelId:
+          notification.data?.type === 'chat' || notification.data?.type === 'message'
+            ? 'messages'
+            : notification.data?.type?.startsWith('order_')
+              ? 'orders'
+              : 'default',
       });
+      tokensForMessages.push(pushToken);
+    }
+
+    if (invalidTokens.length > 0) {
+      await removePushTokensForUser(userId, invalidTokens);
     }
 
     if (messages.length === 0) {
-      console.log('No valid push tokens to send notifications to');
       return;
     }
 
-    // Chunk messages for batch sending
     const chunks = expo.chunkPushNotifications(messages);
-    const tickets: ExpoPushTicket[] = [];
+    const receiptIdToToken: Record<string, string> = {};
+    let tokenCursor = 0;
 
     for (const chunk of chunks) {
+      const chunkTokens = tokensForMessages.slice(tokenCursor, tokenCursor + chunk.length);
+      tokenCursor += chunk.length;
+
       try {
         const ticketChunk = await expo.sendPushNotificationsAsync(chunk);
-        tickets.push(...ticketChunk);
+        await handleTickets(ticketChunk, chunkTokens, userId, receiptIdToToken);
       } catch (error) {
-        console.error('Error sending push notification chunk:', error);
+        console.error('Error sending Expo notification chunk:', error);
       }
     }
 
-    // Handle tickets (optional: store for later receipt checking)
-    handleTickets(tickets, userId);
-    
+    await handleReceipts(receiptIdToToken);
   } catch (error) {
     console.error('Error in sendPushNotificationToUser:', error);
   }
 }
 
-// Send push notification to multiple users
 export async function sendPushNotificationToUsers(
-  userIds: string[], 
+  userIds: string[],
   notification: PushNotificationData
 ): Promise<void> {
-  const sendPromises = userIds.map(userId => 
-    sendPushNotificationToUser(userId, notification)
-  );
-  
+  const sendPromises = userIds.map((userId) => sendPushNotificationToUser(userId, notification));
   await Promise.allSettled(sendPromises);
 }
 
-// Handle notification tickets (check for errors)
-function handleTickets(tickets: ExpoPushTicket[], userId: string): void {
-  tickets.forEach((ticket, index) => {
-    if (ticket.status === 'error') {
-      console.error(
-        `Error sending notification to user ${userId}:`,
-        ticket.message,
-        ticket.details
-      );
-      
-      // Handle specific error types
-      if (ticket.details?.error === 'DeviceNotRegistered') {
-        // Token is invalid, should be removed from database
-        console.log(`Should remove invalid token for user ${userId}`);
-        // TODO: Implement token cleanup
-      }
-    }
-  });
-}
-
-// ====== NOTIFICATION HELPER FUNCTIONS ======
-
-// Send follow notification
 export async function sendFollowNotification(
-  followerId: string, 
+  followerId: string,
   followedUserId: string,
   followerName: string
 ): Promise<void> {
@@ -130,7 +197,6 @@ export async function sendFollowNotification(
   });
 }
 
-// Send like notification
 export async function sendLikeNotification(
   likerId: string,
   postOwnerId: string,
@@ -138,9 +204,8 @@ export async function sendLikeNotification(
   postId: string,
   postTitle?: string
 ): Promise<void> {
-  // Don't send notification to self
   if (likerId === postOwnerId) return;
-  
+
   await sendPushNotificationToUser(postOwnerId, {
     title: 'New Like',
     body: `${likerName} liked your post${postTitle ? `: "${postTitle}"` : ''}`,
@@ -152,7 +217,6 @@ export async function sendLikeNotification(
   });
 }
 
-// Send comment notification
 export async function sendCommentNotification(
   commenterId: string,
   postOwnerId: string,
@@ -160,13 +224,12 @@ export async function sendCommentNotification(
   postId: string,
   commentText: string
 ): Promise<void> {
-  // Don't send notification to self
   if (commenterId === postOwnerId) return;
-  
-  const truncatedComment = commentText.length > 50 
-    ? `${commentText.substring(0, 47)}...` 
+
+  const truncatedComment = commentText.length > 50
+    ? `${commentText.substring(0, 47)}...`
     : commentText;
-  
+
   await sendPushNotificationToUser(postOwnerId, {
     title: 'New Comment',
     body: `${commenterName}: ${truncatedComment}`,
@@ -178,7 +241,6 @@ export async function sendCommentNotification(
   });
 }
 
-// Send order notification
 export async function sendOrderNotification(
   recipientId: string,
   orderId: string,
@@ -196,7 +258,6 @@ export async function sendOrderNotification(
   });
 }
 
-// Send chat message notification
 export async function sendChatNotification(
   senderId: string,
   recipientId: string,
@@ -204,13 +265,12 @@ export async function sendChatNotification(
   messageText: string,
   chatId: string
 ): Promise<void> {
-  // Don't send notification to self
   if (senderId === recipientId) return;
-  
-  const truncatedMessage = messageText.length > 60 
-    ? `${messageText.substring(0, 57)}...` 
+
+  const truncatedMessage = messageText.length > 60
+    ? `${messageText.substring(0, 57)}...`
     : messageText;
-  
+
   await sendPushNotificationToUser(recipientId, {
     title: senderName,
     body: truncatedMessage,

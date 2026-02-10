@@ -1,0 +1,110 @@
+﻿import { Schema, Document, model, Types } from "mongoose";
+
+export interface IMessage extends Document {
+  chat: Types.ObjectId;
+  sender: Types.ObjectId;
+  content: string;
+  messageType: "text" | "image" | "product" | "inquiry" | "payment-request" | "order-update" | "delivery-confirmation";
+  product?: {
+    postId: Types.ObjectId;
+    title: string;
+    price: number;
+    image: string;
+  };
+  inquiryId?: Types.ObjectId;
+  replyTo?: {
+    messageId: Types.ObjectId;
+    content: string;
+    senderName: string;
+    messageType: string;
+  };
+  paymentRequest?: {
+    amount: number;
+    status: "pending" | "completed" | "cancelled";
+    transactionId?: string;
+  };
+  orderUpdate?: {
+    orderId: Types.ObjectId;
+    orderNumber: string;
+    status: string;
+    previousStatus?: string;
+    trackingNumber?: string;
+    estimatedDelivery?: Date;
+  };
+  deliveryConfirmation?: {
+    orderId: Types.ObjectId;
+    orderNumber: string;
+    confirmed?: boolean;
+    confirmedAt?: Date;
+  };
+  isRead: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+const messageSchema = new Schema<IMessage>(
+  {
+    chat: { type: Schema.Types.ObjectId, ref: "Chat", required: true, index: true },
+    sender: { type: Schema.Types.ObjectId, ref: "User", required: true },
+    content: { type: String, required: true },
+    messageType: {
+      type: String,
+      enum: [
+        "text",
+        "image",
+        "product",
+        "inquiry",
+        "payment-request",
+        "order-update",
+        "delivery-confirmation",
+      ],
+      default: "text",
+    },
+    product: {
+      postId: { type: Schema.Types.ObjectId, ref: "ImagePost" },
+      title: String,
+      price: Number,
+      image: String,
+    },
+    inquiryId: { type: Schema.Types.ObjectId },
+    replyTo: {
+      messageId: { type: Schema.Types.ObjectId },
+      content: String,
+      senderName: String,
+      messageType: String,
+    },
+    paymentRequest: {
+      amount: Number,
+      status: {
+        type: String,
+        enum: ["pending", "completed", "cancelled"],
+        default: "pending",
+      },
+      transactionId: String,
+    },
+    orderUpdate: {
+      orderId: { type: Schema.Types.ObjectId, ref: "Order" },
+      orderNumber: String,
+      status: String,
+      previousStatus: String,
+      trackingNumber: String,
+      estimatedDelivery: Date,
+    },
+    deliveryConfirmation: {
+      orderId: { type: Schema.Types.ObjectId, ref: "Order" },
+      orderNumber: String,
+      confirmed: { type: Boolean, default: false },
+      confirmedAt: Date,
+    },
+    isRead: { type: Boolean, default: false },
+  },
+  { timestamps: true }
+);
+
+messageSchema.index({ chat: 1, createdAt: -1 });
+messageSchema.index({ chat: 1, sender: 1, isRead: 1 });
+messageSchema.index({ chat: 1, messageType: 1 });
+
+export const Message = model<IMessage>("Message", messageSchema);
+
+export default Message;

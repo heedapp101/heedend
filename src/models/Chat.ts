@@ -182,7 +182,9 @@ const chatSchema = new Schema<IChat>(
       price: Number,
       image: String,
     },
-    messages: [messageSchema],
+    // Legacy embedded messages (deprecated). Kept for migration only.
+    // New messages are stored in the Message collection.
+    messages: { type: [messageSchema], default: [], select: false },
     lastMessage: {
       content: String,
       sender: { type: Schema.Types.ObjectId, ref: "User" },

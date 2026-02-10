@@ -19,6 +19,7 @@ import {
   reportPost,
   dontRecommendPost,
   getSimilarPosts,
+  updatePost,
   deletePost,
   archivePost,
   getMyArchivedPosts,
@@ -96,6 +97,7 @@ router.post("/:postId/report", requireAuth, reportPost);
 router.post("/:postId/dont-recommend", requireAuth, dontRecommendPost);
 
 /* ---------- DELETE & ARCHIVE POST ---------- */
+router.put("/:postId", requireAuth, updatePost);
 router.delete("/:postId", requireAuth, deletePost);
 router.post("/:postId/archive", requireAuth, archivePost);
 

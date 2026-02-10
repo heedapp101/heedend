@@ -36,9 +36,14 @@ export interface IUser extends Document {
   country?: string;    // ✅ New
   address?: string;
   gstNumber?: string;  // ✅ Renamed from GST
+  requireChatBeforePurchase?: boolean;
+  autoReplyEnabled?: boolean;
+  autoReplyMessage?: string;
+  customQuickQuestion?: string;
+  inventoryAlertThreshold?: number;
   
   // Verification & Store
-  idProofType?: 'GST' | 'PAN' | 'Aadhaar' | 'Driving License'; // One of these is mandatory
+  idProofType?: 'GST' | 'PAN' | 'Aadhaar'; // One of these is mandatory
   idProofNumber?: string; // ✅ The ID number
   idProofUrl?: string;  // ✅ URL to the uploaded doc
   productType?: string; // ✅ New
@@ -115,10 +120,10 @@ const userSchema = new Schema<IUser>(
     address: { type: String, trim: true },
     gstNumber: { type: String, trim: true }, // Optional, not all businesses have GST immediately
     
-    // Identity Proof (One of: GST, PAN, Aadhaar, Driving License)
+    // Identity Proof (One of: GST, PAN, Aadhaar)
     idProofType: { 
       type: String, 
-      enum: ['GST', 'PAN', 'Aadhaar', 'Driving License'],
+      enum: ['GST', 'PAN', 'Aadhaar'],
       trim: true 
     },
     idProofNumber: { type: String, trim: true },
@@ -126,6 +131,15 @@ const userSchema = new Schema<IUser>(
     
     // Store Settings
     productType: { type: String, trim: true },
+    requireChatBeforePurchase: { type: Boolean, default: true },
+    autoReplyEnabled: { type: Boolean, default: false },
+    autoReplyMessage: {
+      type: String,
+      trim: true,
+      default: "Thanks for your message. We will reply soon.",
+    },
+    customQuickQuestion: { type: String, trim: true, default: "" },
+    inventoryAlertThreshold: { type: Number, min: 1, default: 3 },
     
     // Business Delivery Options
     cashOnDeliveryAvailable: { type: Boolean, default: false },
@@ -162,9 +176,9 @@ userSchema.index(
 // ✅ Updated Business Validation Hook
 userSchema.pre("save", function (next) {
   if (this.userType === "business") {
-    // Ensure they provided an ID Proof (one of: GST, PAN, Aadhaar, Driving License)
+    // Ensure they provided an ID Proof (one of: GST, PAN, Aadhaar)
     if (!this.idProofType || !this.idProofNumber || !this.idProofUrl) {
-      return next(new Error("Business accounts require a valid ID proof (GST, PAN, Aadhaar, or Driving License) with number and document upload."));
+      return next(new Error("Business accounts require a valid ID proof (GST, PAN, or Aadhaar) with number and document upload."));
     }
   }
   next();

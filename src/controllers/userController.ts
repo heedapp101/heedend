@@ -7,7 +7,6 @@ import { AuthRequest } from "../middleware/authMiddleware.js";
 import { INTEREST_WEIGHTS } from "../utils/interestUtils.js";
 import { interestBuffer } from "../utils/InterestBuffer.js";
 import { notifyFollow } from "../utils/notificationService.js";
-import { indexUser } from "../services/typesenseSync.js";
 
 // GET CURRENT USER (for token validation)
 export const getCurrentUser = async (req: AuthRequest, res: Response) => {
@@ -64,10 +63,6 @@ export const followUser = async (req: AuthRequest, res: Response) => {
     const updatedTarget = await User.findById(id);
     const updatedCurrent = await User.findById(currentUserId);
 
-    // ✅ Update Typesense index for both users (follower counts changed)
-    if (updatedTarget) indexUser(updatedTarget.toObject()).catch(() => {});
-    if (updatedCurrent) indexUser(updatedCurrent.toObject()).catch(() => {});
-
     res.json({ 
       message: "Followed successfully",
       isFollowing: true,
@@ -104,10 +99,6 @@ export const unfollowUser = async (req: AuthRequest, res: Response) => {
     // Get updated counts
     const updatedTarget = await User.findById(id);
     const updatedCurrent = await User.findById(currentUserId);
-
-    // ✅ Update Typesense index for both users (follower counts changed)
-    if (updatedTarget) indexUser(updatedTarget.toObject()).catch(() => {});
-    if (updatedCurrent) indexUser(updatedCurrent.toObject()).catch(() => {});
 
     res.json({ 
       message: "Unfollowed successfully",
@@ -160,7 +151,6 @@ export const getUserProfile = async (req: Request, res: Response) => {
          .populate({
             path: 'posts',
             select: 'images title price', // Select fields needed for display
-            options: { limit: 4 } // Limit preview items if needed
          });
     } catch (collectionErr) {
        console.error("Collection Fetch Error:", collectionErr);
@@ -203,25 +193,29 @@ export const createCollection = async (req: AuthRequest, res: Response) => {
 export const toggleCollectionItem = async (req: AuthRequest, res: Response) => {
   try {
     if (!req.user) return res.status(401).json({ message: "Unauthorized" });
-    
+
     const { collectionId } = req.params;
     const { postId } = req.body;
 
     if (!postId) return res.status(400).json({ message: "Post ID required" });
 
+    const normalizedPostId = String(postId);
+    if (!mongoose.Types.ObjectId.isValid(normalizedPostId)) {
+      return res.status(400).json({ message: "Invalid Post ID" });
+    }
+
     const collection = await Collection.findOne({ _id: collectionId, user: req.user._id });
     if (!collection) return res.status(404).json({ message: "Collection not found" });
 
-    // Check if post exists (compare strings)
-    const exists = collection.posts.some((p: any) => p.toString() === postId);
+    const exists = collection.posts.some((p: any) => p.toString() === normalizedPostId);
 
     if (exists) {
-      collection.posts = collection.posts.filter((p: any) => p.toString() !== postId);
+      collection.posts = collection.posts.filter((p: any) => p.toString() !== normalizedPostId);
     } else {
-      collection.posts.push(new mongoose.Types.ObjectId(postId) as any);
+      collection.posts.push(new mongoose.Types.ObjectId(normalizedPostId) as any);
 
-      // 🚀 BUFFERED: Add SAVE Weight (Highest intent - user wants to keep this)
-      const post = await ImagePost.findById(postId);
+      // Buffer save-intent weight for recommendations
+      const post = await ImagePost.findById(normalizedPostId);
       if (post && post.tags && post.tags.length > 0) {
         interestBuffer.add(req.user._id.toString(), post.tags, INTEREST_WEIGHTS.SAVE);
       }
@@ -229,24 +223,38 @@ export const toggleCollectionItem = async (req: AuthRequest, res: Response) => {
 
     await collection.save();
 
-    res.json({ 
+    res.json({
       message: exists ? "Removed from collection" : "Added to collection",
       added: !exists,
-      collection 
+      collection,
     });
-
   } catch (err) {
     console.error("Collection Toggle Error:", err);
     res.status(500).json({ message: "Error updating collection" });
   }
 };
-
 // UPDATE USER PROFILE
 export const updateUserProfile = async (req: AuthRequest, res: Response) => {
   try {
     if (!req.user) return res.status(401).json({ message: "Unauthorized" });
 
-    const { name, bio, location, showLocation, profilePic, bannerImg, companyName, address, gstNumber, country } = req.body;
+    const {
+      name,
+      bio,
+      location,
+      showLocation,
+      profilePic,
+      bannerImg,
+      companyName,
+      address,
+      gstNumber,
+      country,
+      requireChatBeforePurchase,
+      autoReplyEnabled,
+      autoReplyMessage,
+      customQuickQuestion,
+      inventoryAlertThreshold,
+    } = req.body;
 
     // Validate required fields
     if (!name || !name.trim()) {
@@ -273,6 +281,14 @@ export const updateUserProfile = async (req: AuthRequest, res: Response) => {
       updateData.address = address?.trim() || "";
       updateData.gstNumber = gstNumber?.trim() || "";
       updateData.country = country?.trim() || "";
+      updateData.requireChatBeforePurchase = requireChatBeforePurchase !== false;
+      updateData.autoReplyEnabled = !!autoReplyEnabled;
+      updateData.autoReplyMessage = autoReplyMessage?.trim() || "Thanks for your message. We will reply soon.";
+      updateData.customQuickQuestion = customQuickQuestion?.trim() || "";
+      updateData.inventoryAlertThreshold =
+        inventoryAlertThreshold && Number(inventoryAlertThreshold) > 0
+          ? Number(inventoryAlertThreshold)
+          : 3;
     }
 
     // Update user
@@ -285,11 +301,6 @@ export const updateUserProfile = async (req: AuthRequest, res: Response) => {
     if (!updatedUser) {
       return res.status(404).json({ message: "User not found" });
     }
-
-    // ✅ Update Typesense index
-    indexUser(updatedUser.toObject()).catch(err => {
-      console.error("⚠️ Failed to update user in Typesense:", err);
-    });
 
     res.json({
       message: "Profile updated successfully",
@@ -401,41 +412,63 @@ export const savePushToken = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user?._id;
     const { pushToken, platform } = req.body;
+    const EXPO_PUSH_TOKEN_PATTERN = /^(ExponentPushToken|ExpoPushToken)\[[^\]]+\]$/;
+
+    if (!userId) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
 
     if (!pushToken) {
       return res.status(400).json({ message: "Push token is required" });
     }
 
-    const user = await User.findById(userId);
-    if (!user) {
+    const trimmedToken = String(pushToken).trim();
+    if (!EXPO_PUSH_TOKEN_PATTERN.test(trimmedToken)) {
+      return res.status(400).json({ message: "Invalid Expo push token format" });
+    }
+
+    const normalizedPlatform =
+      platform === "ios" || platform === "android" ? platform : "unknown";
+
+    // Ensure this token is bound to only one user at a time.
+    await User.updateMany(
+      { _id: { $ne: userId } },
+      { $pull: { pushTokens: { token: trimmedToken } } }
+    );
+
+    // Use update operators instead of user.save() so push-token writes are not blocked
+    // by unrelated pre-save validation rules on user profiles.
+    const updated = await User.findByIdAndUpdate(
+      userId,
+      {
+        $pull: { pushTokens: { token: trimmedToken } },
+      },
+      { new: true }
+    );
+
+    if (!updated) {
       return res.status(404).json({ message: "User not found" });
     }
 
-    // Initialize pushTokens array if not exists
-    if (!user.pushTokens) {
-      user.pushTokens = [];
-    }
-
-    // Check if token already exists
-    const existingTokenIndex = user.pushTokens.findIndex(
-      (t: any) => t.token === pushToken
+    await User.updateOne(
+      { _id: userId },
+      {
+        $push: {
+          pushTokens: {
+            $each: [
+              {
+                token: trimmedToken,
+                platform: normalizedPlatform,
+                createdAt: new Date(),
+              },
+            ],
+            $slice: -10,
+          },
+        },
+      }
     );
 
-    if (existingTokenIndex === -1) {
-      // Add new token
-      user.pushTokens.push({
-        token: pushToken,
-        platform: platform || 'unknown',
-        createdAt: new Date(),
-      });
-    } else {
-      // Update existing token's timestamp
-      user.pushTokens[existingTokenIndex].createdAt = new Date();
-    }
-
-    await user.save();
-
-    res.json({ message: "Push token saved successfully" });
+    res.json({ message: "Push token saved successfully", token: trimmedToken });
   } catch (err) {
     console.error("Save Push Token Error:", err);
     res.status(500).json({ message: "Error saving push token" });
@@ -448,20 +481,18 @@ export const removePushToken = async (req: AuthRequest, res: Response) => {
     const userId = req.user?._id;
     const { pushToken } = req.body;
 
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
+    if (!userId) {
+      return res.status(401).json({ message: "Unauthorized" });
     }
 
-    if (user.pushTokens) {
-      if (pushToken) {
-        // Remove specific token
-        user.pushTokens = user.pushTokens.filter((t: any) => t.token !== pushToken);
-      } else {
-        // Remove all tokens for this user (logout from all devices)
-        user.pushTokens = [];
-      }
-      await user.save();
+    const query = { _id: userId };
+    const update = pushToken
+      ? { $pull: { pushTokens: { token: String(pushToken).trim() } } }
+      : { $set: { pushTokens: [] } };
+
+    const updated = await User.findByIdAndUpdate(query, update, { new: true });
+    if (!updated) {
+      return res.status(404).json({ message: "User not found" });
     }
 
     res.json({ message: "Push token removed successfully" });

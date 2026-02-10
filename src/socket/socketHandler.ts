@@ -1,8 +1,13 @@
 import { Server as HttpServer } from "http";
 import { Server, Socket } from "socket.io";
+import { createAdapter } from "@socket.io/redis-adapter";
 import jwt from "jsonwebtoken";
 import { Chat } from "../models/Chat.js";
+import Message from "../models/Message.js";
 import { Types } from "mongoose";
+import User from "../models/User.js";
+import { getRedisPubSubClients } from "../config/redis.js";
+import { markUserOnline, markUserOffline, isUserOnline as isUserOnlineStore } from "../utils/presenceStore.js";
 
 interface AuthenticatedSocket extends Socket {
   userId?: string;
@@ -34,16 +39,46 @@ interface MessagePayload {
   };
 }
 
-// Store online users: { odekId: socketId }
-const onlineUsers = new Map<string, string>();
+// Store local online sockets per user (fallback/debug)
+const onlineUsers = new Map<string, Set<string>>();
+const getUserRoom = (userId: string) => `user:${userId}`;
+let ioInstance: Server | null = null;
 
-export function initializeSocket(server: HttpServer) {
+export const emitMessageToChat = (chatId: string, payload: any) => {
+  const io = ioInstance;
+  if (!io) return;
+  io.to(chatId).emit("new-message", payload);
+};
+
+export const emitChatNotificationToUsers = (
+  participantIds: string[],
+  senderId: string,
+  payload: any
+) => {
+  const io = ioInstance;
+  if (!io) return;
+  participantIds.forEach((participantId) => {
+    if (participantId === senderId) return;
+    io.to(getUserRoom(participantId)).emit("chat-notification", payload);
+  });
+};
+
+export async function initializeSocket(server: HttpServer) {
   const io = new Server(server, {
     cors: {
       origin: "*",
       methods: ["GET", "POST"],
     },
   });
+  ioInstance = io;
+
+  try {
+    const { pubClient, subClient } = await getRedisPubSubClients();
+    io.adapter(createAdapter(pubClient, subClient));
+    console.log("Socket.io Redis adapter enabled");
+  } catch (error) {
+    console.warn("Redis adapter not available, using in-memory adapter:", error);
+  }
 
   // Authentication middleware
   io.use((socket: AuthenticatedSocket, next) => {
@@ -67,13 +102,19 @@ export function initializeSocket(server: HttpServer) {
     }
   });
 
-  io.on("connection", (socket: AuthenticatedSocket) => {
+  io.on("connection", async (socket: AuthenticatedSocket) => {
     // Add user to online users
     if (socket.userId) {
-      onlineUsers.set(socket.userId, socket.id);
+      socket.join(getUserRoom(socket.userId));
 
-      // Broadcast online status
-      socket.broadcast.emit("user-online", { userId: socket.userId });
+      const localSockets = onlineUsers.get(socket.userId) || new Set<string>();
+      localSockets.add(socket.id);
+      onlineUsers.set(socket.userId, localSockets);
+
+      const isFirstConnection = await markUserOnline(socket.userId, socket.id);
+      if (isFirstConnection) {
+        socket.broadcast.emit("user-online", { userId: socket.userId });
+      }
     }
 
     // --- Join Chat Room ---
@@ -142,13 +183,10 @@ export function initializeSocket(server: HttpServer) {
         }
 
         // If seller is replying, mark inquiry as replied
-        const otherParticipant = chat.participants.find(p => p.toString() !== socket.userId);
         if (finalInquiryId) {
           const inquiry = chat.inquiries.find(i => i._id?.toString() === finalInquiryId?.toString());
-          if (inquiry && inquiry.status === "active") {
-            // Check if this is the seller (owner of the product) replying
-            // For now, just mark as replied when the other person responds
-            const firstMsg = chat.messages.find(m => m._id?.toString() === inquiry.firstMessageId?.toString());
+          if (inquiry && inquiry.status === "active" && inquiry.firstMessageId) {
+            const firstMsg = await Message.findById(inquiry.firstMessageId).select("sender").lean();
             if (firstMsg && firstMsg.sender.toString() !== socket.userId) {
               inquiry.status = "replied";
             }
@@ -158,6 +196,7 @@ export function initializeSocket(server: HttpServer) {
         // Create new message
         const newMessage = {
           _id: messageId,
+          chat: chat._id,
           sender: new Types.ObjectId(socket.userId),
           content,
           messageType: startInquiry ? "inquiry" : messageType,
@@ -182,12 +221,13 @@ export function initializeSocket(server: HttpServer) {
           createdAt: new Date(),
         };
 
-        chat.messages.push(newMessage);
+        const savedMessage = await Message.create(newMessage);
+
         chat.lastMessage = {
           content: startInquiry
-            ? `📦 Inquiry: ${product?.title}`
+            ? `Inquiry: ${product?.title || "Product"}`
             : messageType === "product"
-              ? `📦 ${product?.title}`
+              ? `Product: ${product?.title || "Product"}`
               : messageType === "image"
                 ? "Photo"
                 : content,
@@ -204,7 +244,7 @@ export function initializeSocket(server: HttpServer) {
         io.to(chatId).emit("new-message", {
           chatId,
           message: {
-            ...newMessage,
+            ...savedMessage.toObject(),
             sender: {
               _id: socket.userId,
             },
@@ -215,16 +255,75 @@ export function initializeSocket(server: HttpServer) {
         // Notify other participants who might not be in the chat room
         chat.participants.forEach((participantId) => {
           if (participantId.toString() !== socket.userId) {
-            const recipientSocketId = onlineUsers.get(participantId.toString());
-            if (recipientSocketId) {
-              io.to(recipientSocketId).emit("chat-notification", {
+            io.to(getUserRoom(participantId.toString())).emit("chat-notification", {
+              chatId,
+              message: savedMessage.toObject(),
+              from: socket.userId,
+            });
+          }
+        });
+
+        // Business auto-reply for non-business sender
+        try {
+          const recipientIds = chat.participants
+            .map((p) => p.toString())
+            .filter((id) => id !== socket.userId);
+
+          const businessRecipient = await User.findOne({
+            _id: { $in: recipientIds },
+            userType: "business",
+            autoReplyEnabled: true,
+          }).select("autoReplyEnabled autoReplyMessage");
+
+          if (businessRecipient && socket.userType !== "business") {
+            const autoReplyText =
+              businessRecipient.autoReplyMessage?.trim() ||
+              "Thanks for your message. We will reply soon.";
+
+            const now = Date.now();
+            const recentlySentSameReply = await Message.findOne({
+              chat: chat._id,
+              sender: businessRecipient._id,
+              content: autoReplyText,
+            })
+              .sort({ createdAt: -1 })
+              .lean();
+
+            if (!recentlySentSameReply || now - new Date(recentlySentSameReply.createdAt).getTime() >= 90 * 1000) {
+              const autoReplyMessage = {
+                _id: new Types.ObjectId(),
+                chat: chat._id,
+                sender: new Types.ObjectId(businessRecipient._id),
+                content: autoReplyText,
+                messageType: "text" as const,
+                isRead: false,
+                createdAt: new Date(),
+                inquiryId: finalInquiryId,
+              };
+
+              const savedAutoReply = await Message.create(autoReplyMessage);
+              chat.lastMessage = {
+                content: autoReplyText,
+                sender: new Types.ObjectId(businessRecipient._id),
+                createdAt: new Date(),
+              };
+              await chat.save();
+
+              io.to(chatId).emit("new-message", {
                 chatId,
-                message: newMessage,
-                from: socket.userId,
+                message: {
+                  ...savedAutoReply.toObject(),
+                  sender: {
+                    _id: businessRecipient._id.toString(),
+                  },
+                },
+                activeInquiry: activeInquiry || null,
               });
             }
           }
-        });
+        } catch (autoReplyError) {
+          console.error("Socket auto-reply error:", autoReplyError);
+        }
       } catch (error) {
         console.error("Error sending message:", error);
         socket.emit("error", { message: "Failed to send message" });
@@ -251,19 +350,15 @@ export function initializeSocket(server: HttpServer) {
       try {
         if (!socket.userId) return;
 
-        const chat = await Chat.findById(chatId);
+        const chat = await Chat.findById(chatId).select("_id");
         if (!chat) return;
 
-        let updated = false;
-        chat.messages.forEach((msg) => {
-          if (msg.sender.toString() !== socket.userId && !msg.isRead) {
-            msg.isRead = true;
-            updated = true;
-          }
-        });
+        const updateResult = await Message.updateMany(
+          { chat: chatId, sender: { $ne: socket.userId }, isRead: false },
+          { $set: { isRead: true } }
+        );
 
-        if (updated) {
-          await chat.save();
+        if ((updateResult as any).modifiedCount > 0) {
           // Notify sender that messages were read
           socket.to(chatId).emit("messages-read", {
             chatId,
@@ -276,10 +371,22 @@ export function initializeSocket(server: HttpServer) {
     });
 
     // --- Disconnect ---
-    socket.on("disconnect", () => {
+    socket.on("disconnect", async () => {
       if (socket.userId) {
-        onlineUsers.delete(socket.userId);
-        socket.broadcast.emit("user-offline", { userId: socket.userId });
+        const localSockets = onlineUsers.get(socket.userId);
+        if (localSockets) {
+          localSockets.delete(socket.id);
+          if (localSockets.size === 0) {
+            onlineUsers.delete(socket.userId);
+          } else {
+            onlineUsers.set(socket.userId, localSockets);
+          }
+        }
+
+        const isLastConnection = await markUserOffline(socket.userId, socket.id);
+        if (isLastConnection) {
+          socket.broadcast.emit("user-offline", { userId: socket.userId });
+        }
       }
     });
   });
@@ -296,6 +403,6 @@ export function getIO() {
   return (global as any).io;
 }
 
-export function isUserOnline(userId: string): boolean {
-  return onlineUsers.has(userId);
+export async function isUserOnline(userId: string): Promise<boolean> {
+  return isUserOnlineStore(userId);
 }

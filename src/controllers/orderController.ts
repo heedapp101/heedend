@@ -2,9 +2,14 @@ import { Request, Response } from "express";
 import Order, { OrderStatus, PaymentMethod } from "../models/Order.js";
 import ImagePost from "../models/ImagePost.js";
 import User from "../models/User.js";
-import { Chat, IMessage } from "../models/Chat.js";
+import { Chat } from "../models/Chat.js";
+import Message, { IMessage } from "../models/Message.js";
 import mongoose, { Types } from "mongoose";
-import { notifyOrderStatus } from "../utils/notificationService.js";
+import { notifyOrderStatus, createNotification } from "../utils/notificationService.js";
+import {
+  emitChatNotificationToUsers,
+  emitMessageToChat,
+} from "../socket/socketHandler.js";
 
 interface AuthRequest extends Request {
   user?: { _id: Types.ObjectId; username?: string };
@@ -55,7 +60,6 @@ const getOrCreateOrderChat = async (
       chat = new Chat({
         participants: [buyerId, sellerId],
         chatType: "business",
-        messages: [],
         isActive: true,
       });
       await chat.save();
@@ -64,6 +68,99 @@ const getOrCreateOrderChat = async (
     return chat;
   } catch (error) {
     console.error("Error getting/creating chat:", error);
+    return null;
+  }
+};
+
+const toIdString = (value: any): string => {
+  if (!value) return "";
+  if (typeof value === "string") return value;
+  if (typeof value?.toString === "function") return value.toString();
+  return String(value);
+};
+
+const emitOrderChatMessage = (
+  chat: any,
+  senderId: string,
+  message: IMessage
+) => {
+  const chatId = toIdString(chat?._id);
+  if (!chatId) return;
+
+  const payloadMessage = {
+    ...message,
+    _id: toIdString((message as any)._id),
+    sender: { _id: senderId },
+    product: (message as any).product
+      ? {
+          ...(message as any).product,
+          postId: toIdString((message as any).product.postId),
+        }
+      : undefined,
+  };
+
+  emitMessageToChat(chatId, {
+    chatId,
+    message: payloadMessage,
+  });
+
+  const participants = (chat?.participants || []).map((p: any) => toIdString(p));
+  emitChatNotificationToUsers(participants, senderId, {
+    chatId,
+    message: payloadMessage,
+    from: senderId,
+  });
+};
+
+const sendPurchaseMessage = async (params: {
+  buyerId: Types.ObjectId;
+  sellerId: Types.ObjectId;
+  postId: Types.ObjectId;
+  title: string;
+  unitPrice: number;
+  image: string;
+  quantity: number;
+  remainingStock?: number | null;
+}) => {
+  try {
+    const chat = await getOrCreateOrderChat(params.buyerId, params.sellerId);
+    if (!chat) return null;
+
+    const typedChat = chat as any;
+    const stockSuffix =
+      typeof params.remainingStock === "number"
+        ? ` | Stock left: ${Math.max(0, params.remainingStock)}`
+        : "";
+    const content = `Order placed: ${params.quantity} x ${params.title}${stockSuffix}`;
+
+    const purchaseMessage: IMessage = {
+      _id: new Types.ObjectId(),
+      chat: typedChat._id,
+      sender: new Types.ObjectId(params.buyerId),
+      content,
+      messageType: "product",
+      product: {
+        postId: new Types.ObjectId(params.postId),
+        title: params.title,
+        price: params.unitPrice,
+        image: params.image,
+      },
+      isRead: false,
+      createdAt: new Date(),
+    } as IMessage;
+
+    const savedPurchaseMessage = await Message.create(purchaseMessage);
+    typedChat.lastMessage = {
+      content,
+      sender: new Types.ObjectId(params.buyerId),
+      createdAt: new Date(),
+    };
+    await typedChat.save();
+
+    emitOrderChatMessage(typedChat, params.buyerId.toString(), savedPurchaseMessage.toObject());
+    return typedChat;
+  } catch (error) {
+    console.error("Error sending purchase message:", error);
     return null;
   }
 };
@@ -121,6 +218,8 @@ const sendOrderUpdateMessage = async (
     }
 
     const newMessage: IMessage = {
+      _id: new Types.ObjectId(),
+      chat: typedChat._id,
       sender: senderId,
       content,
       messageType,
@@ -139,9 +238,9 @@ const sendOrderUpdateMessage = async (
       } : undefined,
       isRead: false,
       createdAt: new Date(),
-    };
+    } as IMessage;
 
-    typedChat.messages.push(newMessage);
+    const savedMessage = await Message.create(newMessage);
     typedChat.lastMessage = {
       content: messageType === "delivery-confirmation" ? "📦 Delivery confirmation request" : `📋 Order update: ${ORDER_STATUS_LABELS[newStatus]}`,
       sender: senderId,
@@ -149,6 +248,7 @@ const sendOrderUpdateMessage = async (
     };
 
     await typedChat.save();
+    emitOrderChatMessage(typedChat, senderId.toString(), savedMessage.toObject());
   } catch (error) {
     console.error("Error sending order update message:", error);
     // Don't throw - message sending failure shouldn't break the order update
@@ -172,10 +272,22 @@ export const createOrder = async (req: AuthRequest, res: Response) => {
       buyerNotes,
       chatId,
     } = req.body;
+    if (!buyerId) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+    const validChatId =
+      chatId && mongoose.Types.ObjectId.isValid(String(chatId))
+        ? new mongoose.Types.ObjectId(String(chatId))
+        : undefined;
 
     // Validate required fields
     if (!postId || !paymentMethod || !shippingAddress) {
       return res.status(400).json({ message: "Missing required fields" });
+    }
+
+    const parsedQuantity = Number(quantity);
+    if (!Number.isInteger(parsedQuantity) || parsedQuantity <= 0) {
+      return res.status(400).json({ message: "Quantity must be a positive integer" });
     }
 
     // Validate payment method
@@ -184,16 +296,32 @@ export const createOrder = async (req: AuthRequest, res: Response) => {
     }
 
     // Get the product
-    const post = await ImagePost.findById(postId).populate("user", "username name cashOnDeliveryAvailable");
+    const post = await ImagePost.findById(postId).populate(
+      "user",
+      "username name cashOnDeliveryAvailable inventoryAlertThreshold"
+    );
     if (!post) {
       return res.status(404).json({ message: "Product not found" });
     }
 
     const seller = post.user as any;
+    const hasManagedInventory = typeof (post as any).quantityAvailable === "number";
+    const currentQuantity = hasManagedInventory ? Number((post as any).quantityAvailable) : null;
 
     // Prevent buying own product
-    if (seller._id.toString() === buyerId) {
+    if (seller._id.toString() === buyerId?.toString()) {
       return res.status(400).json({ message: "Cannot buy your own product" });
+    }
+
+    if ((post as any).isOutOfStock === true || (hasManagedInventory && currentQuantity !== null && currentQuantity <= 0)) {
+      return res.status(400).json({ message: "This product is out of stock" });
+    }
+
+    if (hasManagedInventory && currentQuantity !== null && parsedQuantity > currentQuantity) {
+      return res.status(400).json({
+        message: `Only ${currentQuantity} item(s) available in stock`,
+        availableQuantity: currentQuantity,
+      });
     }
 
     // Check if COD is available for this seller
@@ -202,7 +330,7 @@ export const createOrder = async (req: AuthRequest, res: Response) => {
     }
 
     // Calculate pricing
-    const subtotal = (post.price || 0) * quantity;
+    const subtotal = (post.price || 0) * parsedQuantity;
     const shippingCharge = subtotal >= 500 ? 0 : 50; // Free shipping above ₹500
     const discount = 0; // Can add coupon system later
     const totalAmount = subtotal + shippingCharge - discount;
@@ -212,7 +340,7 @@ export const createOrder = async (req: AuthRequest, res: Response) => {
       post: post._id,
       title: post.title,
       price: post.price || 0,
-      quantity,
+      quantity: parsedQuantity,
       image: post.images[0]?.low || post.images[0]?.high || "",
     };
 
@@ -233,11 +361,60 @@ export const createOrder = async (req: AuthRequest, res: Response) => {
       paymentStatus: paymentMethod === "cod" ? "pending" : "pending",
       shippingAddress,
       buyerNotes,
-      chatId,
+      chatId: validChatId,
       status: "pending",
     });
 
     await order.save();
+
+    // Reduce inventory when quantity tracking is enabled for the post
+    if (hasManagedInventory && currentQuantity !== null) {
+      const nextQuantity = Math.max(0, currentQuantity - parsedQuantity);
+      (post as any).quantityAvailable = nextQuantity;
+      (post as any).isOutOfStock = nextQuantity === 0;
+      await post.save();
+
+      // Notify seller if stock is low or exhausted
+      const threshold = Number(seller.inventoryAlertThreshold || 3);
+      if (nextQuantity === 0) {
+        await createNotification({
+          recipientId: seller._id.toString(),
+          type: "system",
+          title: "Inventory Empty",
+          message: `"${post.title}" is now out of stock.`,
+          postId: post._id.toString(),
+          metadata: { postId: post._id.toString(), quantityAvailable: 0 },
+        });
+      } else if (nextQuantity <= threshold) {
+        await createNotification({
+          recipientId: seller._id.toString(),
+          type: "system",
+          title: "Low Inventory Alert",
+          message: `"${post.title}" is running low (${nextQuantity} left).`,
+          postId: post._id.toString(),
+          metadata: { postId: post._id.toString(), quantityAvailable: nextQuantity },
+        });
+      }
+    }
+
+    const remainingStock =
+      typeof (post as any).quantityAvailable === "number"
+        ? Number((post as any).quantityAvailable)
+        : null;
+    const purchaseChat = await sendPurchaseMessage({
+      buyerId: new Types.ObjectId(buyerId),
+      sellerId: new Types.ObjectId(seller._id),
+      postId: new Types.ObjectId(post._id),
+      title: post.title,
+      unitPrice: post.price || 0,
+      image: post.images[0]?.low || post.images[0]?.high || "",
+      quantity: parsedQuantity,
+      remainingStock,
+    });
+    if (purchaseChat && (!order.chatId || order.chatId.toString() !== purchaseChat._id.toString())) {
+      order.chatId = purchaseChat._id;
+      await order.save();
+    }
 
     // Populate for response
     const populatedOrder = await Order.findById(order._id)
@@ -890,19 +1067,24 @@ const updateDeliveryConfirmationInChat = async (
 
     if (!chat) return;
 
-    // Find the last delivery confirmation message for this order
-    const typedChat = chat as any;
-    const confirmationMsg = typedChat.messages
-      .filter((m: any) => 
-        m.messageType === "delivery-confirmation" && 
-        m.deliveryConfirmation?.orderId?.toString() === orderId.toString()
-      )
-      .pop();
+    const confirmationMsg = await Message.findOne({
+      chat: chat._id,
+      messageType: "delivery-confirmation",
+      "deliveryConfirmation.orderId": orderId,
+    }).sort({ createdAt: -1 });
 
-    if (confirmationMsg) {
-      confirmationMsg.deliveryConfirmation.confirmed = confirmed;
-      confirmationMsg.deliveryConfirmation.confirmedAt = new Date();
-      await typedChat.save();
+    if (
+      confirmationMsg &&
+      confirmationMsg.deliveryConfirmation?.orderId &&
+      confirmationMsg.deliveryConfirmation?.orderNumber
+    ) {
+      confirmationMsg.deliveryConfirmation = {
+        orderId: confirmationMsg.deliveryConfirmation.orderId,
+        orderNumber: confirmationMsg.deliveryConfirmation.orderNumber,
+        confirmed,
+        confirmedAt: new Date(),
+      };
+      await confirmationMsg.save();
     }
   } catch (error) {
     console.error("Error updating delivery confirmation:", error);

@@ -1,12 +1,6 @@
 import { Request, Response } from "express";
 import ImagePost from "../models/ImagePost.js";
 import User from "../models/User.js";
-import { isTypesenseAvailable } from "../config/typesense.js";
-import {
-  searchAll as typesenseSearchAll,
-  searchPostsByTags,
-  findSimilarPosts,
-} from "../services/typesenseSearch.js";
 
 const clamp = (value: number, min: number, max: number) =>
   Math.max(min, Math.min(max, value));
@@ -14,9 +8,53 @@ const clamp = (value: number, min: number, max: number) =>
 const escapeRegex = (value: string) =>
   value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+const normalizeSearchText = (value: string) =>
+  value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const buildSearchPatterns = (value: string) => {
+  const normalized = normalizeSearchText(value);
+  if (!normalized) return [];
+
+  const tokens = normalized.split(" ").filter(Boolean);
+  const patternSet = new Set<string>();
+  const addPattern = (pattern: string) => {
+    const p = pattern.trim();
+    if (p.length >= 2) patternSet.add(p);
+  };
+
+  tokens.forEach((token) => {
+    addPattern(token);
+    if (token.length >= 4) addPattern(token.slice(0, 3));
+    if (token.length >= 5) addPattern(token.slice(0, 4));
+  });
+
+  if (tokens.length === 1) {
+    const token = tokens[0];
+    const mid = Math.floor(token.length / 2);
+    for (let offset = -2; offset <= 2; offset++) {
+      const splitAt = mid + offset;
+      if (splitAt < 3 || token.length - splitAt < 3) continue;
+      const left = token.slice(0, splitAt);
+      const right = token.slice(splitAt);
+      addPattern(left);
+      addPattern(right);
+      if (right.length >= 4) addPattern(right.slice(0, 3));
+    }
+  }
+
+  return Array.from(patternSet).slice(0, 12);
+};
+
+const buildQueryRegexes = (value: string) =>
+  buildSearchPatterns(value).map((pattern) => new RegExp(escapeRegex(pattern), "i"));
+
 /**
  * Unified Search Controller
- * Uses Typesense when available (~5ms), falls back to MongoDB (~50-200ms)
+ * MongoDB text index + regex fallback
  */
 export const searchAll = async (req: Request, res: Response) => {
   try {
@@ -27,19 +65,7 @@ export const searchAll = async (req: Request, res: Response) => {
     const query = raw.replace(/^[@#]/, "").trim();
     if (!query) return res.json({ users: [], posts: [], tags: [], similar: [] });
 
-    // ==========================================
-    // TRY TYPESENSE FIRST (Fast Path ~5ms)
-    // ==========================================
-    const typesenseAvailable = await isTypesenseAvailable();
-    
-    if (typesenseAvailable) {
-      return await searchWithTypesense(req, res, query, mode);
-    }
-    
-    // ==========================================
-    // FALLBACK TO MONGODB (Slow Path ~50-200ms)
-    // ==========================================
-    console.log("⚠️ Using MongoDB fallback for search");
+    // MongoDB search (text index + regex fallbacks)
 
     const usersLimit = clamp(parseInt(req.query.usersLimit as string) || 8, 0, 20);
     const postsLimit = clamp(parseInt(req.query.postsLimit as string) || 20, 0, 50);
@@ -50,6 +76,10 @@ export const searchAll = async (req: Request, res: Response) => {
     const escaped = escapeRegex(query);
     const prefixRegex = new RegExp(`^${escaped}`, "i");
     const containsRegex = new RegExp(escaped, "i");
+    const fuzzyRegexes = buildQueryRegexes(query);
+    const tagMatchConditions = (
+      fuzzyRegexes.length > 0 ? fuzzyRegexes : [containsRegex]
+    ).map((regex) => ({ tags: { $regex: regex } }));
 
     const basePostFilter = {
       $or: [{ isArchived: false }, { isArchived: { $exists: false } }],
@@ -179,13 +209,19 @@ export const searchAll = async (req: Request, res: Response) => {
     const searchTags = async () => {
       if (tagsLimit === 0) return [];
 
-      const tagRegex = new RegExp(`^${escaped}`, "i");
       const tagResults = await ImagePost.aggregate([
-        { $match: { tags: { $regex: tagRegex } } },
+        {
+          $match: {
+            $and: [
+              basePostFilter,
+              { $or: tagMatchConditions },
+            ],
+          },
+        },
         { $unwind: "$tags" },
-        { $match: { tags: { $regex: tagRegex } } },
+        { $match: { $or: tagMatchConditions } },
         { $group: { _id: "$tags", count: { $sum: 1 } } },
-        { $sort: { count: -1 } },
+        { $sort: { count: -1, _id: 1 } },
         { $limit: tagsLimit },
         { $project: { _id: 0, tag: "$_id", count: 1 } },
       ]);
@@ -200,8 +236,10 @@ export const searchAll = async (req: Request, res: Response) => {
 
       if (mode === "tags") {
         posts = await ImagePost.find({
-          ...basePostFilter,
-          tags: { $regex: new RegExp(`^${escaped}`, "i") },
+          $and: [
+            basePostFilter,
+            { $or: tagMatchConditions },
+          ],
         })
           .populate("user", "username userType profilePic name companyName isVerified")
           .sort({ views: -1, createdAt: -1 })
@@ -226,16 +264,24 @@ export const searchAll = async (req: Request, res: Response) => {
 
         // 2. Regex fallback if text search returned nothing
         if (posts.length === 0) {
-          const searchRegex = new RegExp(escaped, "i");
+          const regexConditions =
+            fuzzyRegexes.length > 0
+              ? fuzzyRegexes.flatMap((regex) => [
+                  { title: { $regex: regex } },
+                  { description: { $regex: regex } },
+                  { tags: { $regex: regex } },
+                ])
+              : [
+                  { title: { $regex: containsRegex } },
+                  { description: { $regex: containsRegex } },
+                  { tags: { $regex: containsRegex } },
+                ];
+
           posts = await ImagePost.find({
             $and: [
               basePostFilter,
               {
-                $or: [
-                  { title: { $regex: searchRegex } },
-                  { description: { $regex: searchRegex } },
-                  { tags: { $regex: searchRegex } },
-                ],
+                $or: regexConditions,
               },
             ],
           })
@@ -253,8 +299,10 @@ export const searchAll = async (req: Request, res: Response) => {
 
           // Find all tags that match the query
           const matchingTags = await ImagePost.distinct("tags", {
-            ...basePostFilter,
-            tags: { $regex: containsRegex },
+            $and: [
+              basePostFilter,
+              { $or: tagMatchConditions },
+            ],
           });
 
           if (matchingTags.length > 0) {
@@ -318,141 +366,3 @@ export const searchAll = async (req: Request, res: Response) => {
     res.status(500).json({ message: "Failed to search" });
   }
 };
-
-// ==========================================
-// TYPESENSE SEARCH (Fast ~5ms)
-// ==========================================
-async function searchWithTypesense(
-  req: Request,
-  res: Response,
-  query: string,
-  mode: string
-) {
-  const usersLimit = clamp(parseInt(req.query.usersLimit as string) || 8, 0, 20);
-  const postsLimit = clamp(parseInt(req.query.postsLimit as string) || 20, 0, 50);
-  const tagsLimit = clamp(parseInt(req.query.tagsLimit as string) || 10, 0, 20);
-  const page = clamp(parseInt(req.query.page as string) || 1, 1, 1000);
-
-  try {
-    if (mode === "tags") {
-      // Tag search mode - search posts by tag
-      const postsResult = await searchPostsByTags([query], { page, limit: postsLimit });
-      
-      // Find similar posts
-      const allTags = [...new Set(postsResult.hits.flatMap((p) => p.tags || []))];
-      const similar = allTags.length > 0 
-        ? await findSimilarPosts(allTags, "", 10)
-        : [];
-
-      return res.json({
-        users: [],
-        posts: postsResult.hits.map(formatTypesensePost),
-        tags: [{ tag: query, count: postsResult.found }],
-        similar: similar.map(formatTypesensePost),
-        _meta: {
-          engine: "typesense",
-          searchTimeMs: postsResult.searchTimeMs,
-          totalPosts: postsResult.found,
-        },
-      });
-    }
-
-    if (mode === "users") {
-      // User search mode
-      const result = await typesenseSearchAll({
-        query,
-        postsLimit: 0,
-        usersLimit,
-        tagsLimit: 0,
-        page,
-      });
-
-      return res.json({
-        users: result.users.hits.map(formatTypesenseUser),
-        posts: [],
-        tags: [],
-        similar: [],
-        _meta: {
-          engine: "typesense",
-          searchTimeMs: result.searchTimeMs,
-        },
-      });
-    }
-
-    // All mode - search everything
-    const result = await typesenseSearchAll({
-      query,
-      postsLimit,
-      usersLimit,
-      tagsLimit,
-      page,
-    });
-
-    // Find similar posts based on tags from results
-    const allTags = [...new Set(result.posts.hits.flatMap((p) => p.tags || []))];
-    const excludeIds = result.posts.hits.map((p) => p.id);
-    const similar = allTags.length > 0
-      ? await findSimilarPosts(allTags, excludeIds[0] || "", 10)
-      : [];
-
-    return res.json({
-      users: result.users.hits.map(formatTypesenseUser),
-      posts: result.posts.hits.map(formatTypesensePost),
-      tags: result.tags,
-      similar: similar.map(formatTypesensePost),
-      _meta: {
-        engine: "typesense",
-        searchTimeMs: result.searchTimeMs,
-        totalPosts: result.posts.found,
-        totalUsers: result.users.found,
-      },
-    });
-  } catch (error) {
-    console.error("Typesense search error, falling back to MongoDB:", error);
-    // Don't fail - let the MongoDB fallback handle it
-    throw error;
-  }
-}
-
-/**
- * Format Typesense post result to match MongoDB format
- */
-function formatTypesensePost(post: any) {
-  return {
-    _id: post.id,
-    title: post.title,
-    description: post.description,
-    tags: post.tags,
-    price: post.price,
-    views: post.views,
-    likes: post.likes,
-    images: [{ low: post.imageUrl, high: post.imageUrlHigh }],
-    createdAt: new Date(post.createdAt),
-    user: {
-      _id: post.userId,
-      username: post.username,
-      userType: post.userType,
-      profilePic: post.profilePic,
-      companyName: post.companyName,
-      isVerified: post.isVerified,
-    },
-    isBoosted: post.isBoosted,
-    _highlights: post._highlights,
-  };
-}
-
-/**
- * Format Typesense user result to match MongoDB format
- */
-function formatTypesenseUser(user: any) {
-  return {
-    _id: user.id,
-    username: user.username,
-    name: user.name,
-    userType: user.userType,
-    profilePic: user.profilePic,
-    isVerified: user.isVerified,
-    companyName: user.companyName,
-    followersCount: user.followersCount,
-  };
-}
