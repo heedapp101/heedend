@@ -9,6 +9,7 @@ import {
   toggleLikePost,
   searchPosts,
   getTrendingPosts,
+  getAwardedPosts,
   getRecommendedPosts,
   getExplore,
   getHomeFeed,
@@ -48,6 +49,7 @@ const searchLimiter = rateLimit({
 /* ---------- SEARCH & DISCOVERY ---------- */
 router.get("/search", searchLimiter, searchPosts);
 router.get("/trending", getTrendingPosts); // No rate limit (cached)
+router.get("/awarded", getAwardedPosts);
 router.get("/recommended", recommendationLimiter, optionalAuth, getRecommendedPosts);
 router.get("/explore", getExplore);
 

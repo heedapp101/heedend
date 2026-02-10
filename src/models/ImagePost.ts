@@ -54,6 +54,22 @@ const imagePostSchema = new Schema(
     // ✅ ARCHIVE SYSTEM: Allow users to hide posts without deleting
     isArchived: { type: Boolean, default: false },
     archivedAt: { type: Date },
+
+    // ✅ ADMIN VISIBILITY: Hide posts from public feeds
+    adminHidden: { type: Boolean, default: false },
+
+    // ✅ AWARD / PROMOTION SYSTEM (Admin-curated)
+    isAwarded: { type: Boolean, default: false },
+    awardStatus: {
+      type: String,
+      enum: ["pending", "approved", "paid", "rejected"],
+      default: "pending",
+    },
+    awardAmount: { type: Number, min: 0 },
+    awardedAt: { type: Date },
+    awardPaidAt: { type: Date },
+    awardHidden: { type: Boolean, default: false },
+    awardPriority: { type: Number, default: 0 },
   },
   { timestamps: true }
 );
@@ -85,5 +101,10 @@ imagePostSchema.index({ tags: 1, views: -1 });      // Compound: content + popul
 // ✅ BOOSTING: Indexes for efficient boosted post queries
 imagePostSchema.index({ isBoosted: 1, boostExpiresAt: -1 }); // Active boosted posts
 imagePostSchema.index({ isBoosted: 1, boostedAt: -1 });      // Recently boosted (King of Hill)
+
+// ✅ ADMIN/AWARD INDEXES
+imagePostSchema.index({ adminHidden: 1, createdAt: -1 });
+imagePostSchema.index({ isAwarded: 1, awardStatus: 1, awardedAt: -1 });
+imagePostSchema.index({ awardPriority: -1, awardedAt: -1 });
 
 export default mongoose.model("ImagePost", imagePostSchema);

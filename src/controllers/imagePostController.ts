@@ -32,6 +32,22 @@ const parseBooleanInput = (value: unknown): boolean | undefined => {
   return undefined;
 };
 
+const visibilityFilter = {
+  $and: [
+    { $or: [{ isArchived: false }, { isArchived: { $exists: false } }] },
+    { $or: [{ adminHidden: false }, { adminHidden: { $exists: false } }] },
+  ],
+};
+
+const applyVisibilityFilter = (match: Record<string, any>) => {
+  if (!match.$and) {
+    match.$and = [...visibilityFilter.$and];
+  } else {
+    match.$and = [...match.$and, ...visibilityFilter.$and];
+  }
+  return match;
+};
+
 /* =========================
    CREATE IMAGE POST
 ========================= */
@@ -215,7 +231,10 @@ export const getAllImagePosts = async (req: Request, res: Response) => {
     const limit = parseInt(req.query.limit as string) || 10;
     const skip = (page - 1) * limit;
 
-    const posts = await ImagePost.find()
+    const baseMatch: any = {};
+    applyVisibilityFilter(baseMatch);
+
+    const posts = await ImagePost.find(baseMatch)
       .populate("user", "username userType requireChatBeforePurchase")
       .sort({ createdAt: -1 })
       .skip(skip)
@@ -284,6 +303,14 @@ export const getSinglePost = async (req: AuthRequest, res: Response) => {
       "username userType name profilePic requireChatBeforePurchase autoReplyEnabled autoReplyMessage customQuickQuestion inventoryAlertThreshold cashOnDeliveryAvailable"
     );
     if (!post) return res.status(404).json({ message: "Not found" });
+
+    // Hide admin-hidden posts from public access
+    const isAdmin = req.user?.userType === "admin";
+    const postOwnerId = (post.user as any)?._id ? (post.user as any)._id.toString() : post.user.toString();
+    const isOwner = req.user && postOwnerId === req.user._id.toString();
+    if ((post as any).adminHidden && !isAdmin && !isOwner) {
+      return res.status(404).json({ message: "Not found" });
+    }
 
     // ✅ UNIQUE VIEWS: Only count view if user hasn't viewed before
     // Anonymous users always count (can't track them)
@@ -452,10 +479,13 @@ export const getPostsByUser = async (req: Request, res: Response) => {
     }
 
     // Don't show archived posts to other users viewing a profile
-    const posts = await ImagePost.find({ 
+    const match: any = { 
       user: userId,
       $or: [{ isArchived: false }, { isArchived: { $exists: false } }]
-    })
+    };
+    applyVisibilityFilter(match);
+
+    const posts = await ImagePost.find(match)
       .populate("user", "username userType requireChatBeforePurchase")
       .sort({ createdAt: -1 });
 
@@ -493,8 +523,11 @@ export const searchPosts = async (req: Request, res: Response) => {
     
     // Try text search first (faster, uses index, supports stemming)
     try {
+      const textMatch: any = { $text: { $search: query } };
+      applyVisibilityFilter(textMatch);
+
       posts = await ImagePost.find(
-        { $text: { $search: query } },
+        textMatch,
         { score: { $meta: "textScore" } } // Include relevance score
       )
         .populate("user", "username userType profilePic")
@@ -510,13 +543,16 @@ export const searchPosts = async (req: Request, res: Response) => {
     // If text search returned no results, fallback to regex (for partial matches)
     if (posts.length === 0) {
       const searchRegex = new RegExp(query, "i");
-      posts = await ImagePost.find({
-          $or: [
-            { title: { $regex: searchRegex } },
-            { description: { $regex: searchRegex } },
-            { tags: { $regex: searchRegex } },
-          ],
-        })
+      const regexMatch: any = {
+        $or: [
+          { title: { $regex: searchRegex } },
+          { description: { $regex: searchRegex } },
+          { tags: { $regex: searchRegex } },
+        ],
+      };
+      applyVisibilityFilter(regexMatch);
+
+      posts = await ImagePost.find(regexMatch)
         .populate("user", "username userType profilePic")
         .sort({ views: -1, createdAt: -1 })
         .skip(skip)
@@ -543,19 +579,59 @@ export const searchPosts = async (req: Request, res: Response) => {
 ====================================================== */
 export const getTrendingPosts = async (req: Request, res: Response) => {
   try {
-    const limit = parseInt(req.query.limit as string) || 10;
+    const limit = Math.min(parseInt(req.query.limit as string) || 10, 50);
+    const page = Math.max(parseInt(req.query.page as string) || 1, 1);
+    const skip = (page - 1) * limit;
+    const tag = req.query.tag as string | undefined;
+    const sort = String(req.query.sort || "gravity").toLowerCase();
+    const windowRaw = String(req.query.window || req.query.timeWindow || req.query.days || "7d")
+      .toLowerCase()
+      .trim();
+
+    const parseWindowMs = (value: string): number | null => {
+      if (!value || value === "default") return 7 * 24 * 60 * 60 * 1000;
+      if (value === "all" || value === "0") return null;
+
+      const normalized = value.replace(/\s+/g, "");
+      if (/^\d+$/.test(normalized)) {
+        return parseInt(normalized, 10) * 24 * 60 * 60 * 1000; // days
+      }
+
+      const match = normalized.match(/^(\d+)(h|d|w|m)$/);
+      if (!match) return 7 * 24 * 60 * 60 * 1000;
+
+      const amount = parseInt(match[1], 10);
+      const unit = match[2];
+      if (unit === "h") return amount * 60 * 60 * 1000;
+      if (unit === "d") return amount * 24 * 60 * 60 * 1000;
+      if (unit === "w") return amount * 7 * 24 * 60 * 60 * 1000;
+      if (unit === "m") return amount * 30 * 24 * 60 * 60 * 1000;
+      return 7 * 24 * 60 * 60 * 1000;
+    };
+
+    const windowMs = parseWindowMs(windowRaw);
+    const matchStage: any = {};
+    if (windowMs) {
+      matchStage.createdAt = { $gte: new Date(Date.now() - windowMs) };
+    }
+    if (tag) {
+      matchStage.tags = { $regex: new RegExp(tag, "i") };
+    }
+    if (req.query.includeBoosted !== "true") {
+      matchStage.isBoosted = { $ne: true };
+    }
+    applyVisibilityFilter(matchStage);
+
+    const sortStage =
+      sort === "popular"
+        ? { popularity: -1, createdAt: -1 }
+        : sort === "recent"
+          ? { createdAt: -1 }
+          : { trendScore: -1 };
 
     const posts = await ImagePost.aggregate([
+      { $match: matchStage },
       {
-        // 1. Only consider posts from last 7 days to speed up query
-        $match: {
-          createdAt: {
-            $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
-          },
-        },
-      },
-      {
-        // 2. Calculate Score dynamically
         $addFields: {
           ageInHours: {
             $divide: [{ $subtract: [new Date(), "$createdAt"] }, 3600000],
@@ -563,14 +639,13 @@ export const getTrendingPosts = async (req: Request, res: Response) => {
           popularity: {
             $add: [
               { $ifNull: ["$views", 0] },
-              { $multiply: [{ $size: { $ifNull: ["$likedBy", []] } }, 5] }, // 1 Like = 5pts
+              { $multiply: [{ $size: { $ifNull: ["$likedBy", []] } }, 5] },
             ],
           },
         },
       },
       {
         $addFields: {
-          // Gravity Formula: Popularity / (Age + 2)^1.5
           trendScore: {
             $divide: [
               "$popularity",
@@ -579,10 +654,10 @@ export const getTrendingPosts = async (req: Request, res: Response) => {
           },
         },
       },
-      { $sort: { trendScore: -1 } }, // Highest score first
+      { $sort: sortStage },
+      { $skip: skip },
       { $limit: limit },
       {
-        // 3. Populate User details
         $lookup: {
           from: "users",
           localField: "user",
@@ -614,22 +689,74 @@ export const getTrendingPosts = async (req: Request, res: Response) => {
       likes: post.likedBy?.length || 0,
     }));
 
-    // Also fetch trending tags (most used across all posts)
+    const tagMatch: any = { ...matchStage };
+    if (matchStage.$and) {
+      tagMatch.$and = [...matchStage.$and];
+    }
+
     const trendingTags = await ImagePost.aggregate([
+      { $match: tagMatch },
       { $unwind: "$tags" },
       { $group: { _id: "$tags", count: { $sum: 1 } } },
       { $sort: { count: -1 } },
-      { $limit: 15 },
+      { $limit: 10 },
       { $project: { tag: "$_id", count: 1, _id: 0 } },
     ]);
 
     res.json({
       posts: formattedPosts,
       tags: trendingTags,
+      page,
+      hasMore: formattedPosts.length === limit,
     });
   } catch (err) {
     console.error("Get Trending Error:", err);
     res.status(500).json({ message: "Failed to fetch trending posts" });
+  }
+};
+
+/* ======================================================
+   GET AWARDED / PROMOTED POSTS (Admin-curated)
+====================================================== */
+export const getAwardedPosts = async (req: Request, res: Response) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit as string) || 10, 50);
+    const page = Math.max(parseInt(req.query.page as string) || 1, 1);
+    const skip = (page - 1) * limit;
+    const status = (req.query.status as string) || "paid";
+    const tag = req.query.tag as string | undefined;
+
+    const match: any = { isAwarded: true };
+    if (status && status !== "all") {
+      match.awardStatus = status;
+    }
+    if (tag) {
+      match.tags = { $regex: new RegExp(tag, "i") };
+    }
+    match.$and = match.$and || [];
+    match.$and.push({ $or: [{ awardHidden: false }, { awardHidden: { $exists: false } }] });
+    applyVisibilityFilter(match);
+
+    const posts = await ImagePost.find(match)
+      .populate("user", "username userType profilePic")
+      .sort({ awardPriority: -1, awardedAt: -1, createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean();
+
+    const formatted = posts.map(post => ({
+      ...post,
+      likes: (post as any).likedBy?.length || 0,
+    }));
+
+    res.json({
+      posts: formatted,
+      page,
+      hasMore: formatted.length === limit,
+    });
+  } catch (err) {
+    console.error("Get Awarded Error:", err);
+    res.status(500).json({ message: "Failed to fetch awarded posts" });
   }
 };
 
@@ -666,7 +793,11 @@ export const getRecommendedPosts = async (req: AuthRequest, res: Response) => {
 
     // A. Cold Start: If no user logged in, return Trending + Fresh mix
     if (!req.user) {
+      const coldMatch: any = {};
+      applyVisibilityFilter(coldMatch);
+
       const posts = await ImagePost.aggregate([
+        { $match: coldMatch },
         {
           $addFields: {
             // Simple engagement score for anonymous users
@@ -761,7 +892,11 @@ export const getRecommendedPosts = async (req: AuthRequest, res: Response) => {
 
     // C. If user has no interests yet, return 'Trending'
     if (topTags.length === 0 && userLikedPostIds.length === 0) {
+      const trendingMatch: any = {};
+      applyVisibilityFilter(trendingMatch);
+
       const posts = await ImagePost.aggregate([
+        { $match: trendingMatch },
         {
           $addFields: {
             engagementScore: {
@@ -813,13 +948,14 @@ export const getRecommendedPosts = async (req: AuthRequest, res: Response) => {
     // D. LIGHTWEIGHT RECOMMENDATION ALGORITHM (No Collaborative Filtering)
     
     // D1. CONTENT-BASED - Posts matching user interests
+    const contentMatch: any = {
+      tags: { $in: topTags },
+      user: { $ne: req.user._id },
+    };
+    applyVisibilityFilter(contentMatch);
+
     const contentBased = await ImagePost.aggregate([
-      {
-        $match: {
-          tags: { $in: topTags },
-          user: { $ne: req.user._id },
-        },
-      },
+      { $match: contentMatch },
       {
         $addFields: {
           // Relevance: How many tags match
@@ -874,14 +1010,15 @@ export const getRecommendedPosts = async (req: AuthRequest, res: Response) => {
     ]);
 
     // D2. Diversity Injection: Random quality posts (prevents filter bubble)
+    const diversityMatch: any = {
+      tags: { $not: { $in: topTags } }, // Different from user interests
+      user: { $ne: req.user._id },
+      views: { $gte: 50 }, // Quality threshold
+    };
+    applyVisibilityFilter(diversityMatch);
+
     const diversityPosts = await ImagePost.aggregate([
-      {
-        $match: {
-          tags: { $not: { $in: topTags } }, // Different from user interests
-          user: { $ne: req.user._id },
-          views: { $gte: 50 }, // Quality threshold
-        },
-      },
+      { $match: diversityMatch },
       { $sample: { size: Math.ceil(limit * 0.1) } }, // 10% diversity
     ]);
 
@@ -900,7 +1037,10 @@ export const getRecommendedPosts = async (req: AuthRequest, res: Response) => {
 
     // D5. Populate user data
     const postIds = paginated.map((p) => p._id);
-    const finalPosts = await ImagePost.find({ _id: { $in: postIds } })
+    const finalMatch: any = { _id: { $in: postIds } };
+    applyVisibilityFilter(finalMatch);
+
+    const finalPosts = await ImagePost.find(finalMatch)
       .populate("user", "username userType profilePic")
       .lean();
 
@@ -954,6 +1094,7 @@ export const getExplore = async (req: Request, res: Response) => {
     if (tag) {
       matchStage.tags = { $regex: new RegExp(tag, "i") };
     }
+    applyVisibilityFilter(matchStage);
 
     // Fetch posts and ads in parallel
     const [explorePosts, inFeedAds] = await Promise.all([
@@ -1029,8 +1170,11 @@ export const getExplore = async (req: Request, res: Response) => {
       const existingIds = formattedPosts.map(p => p._id.toString());
       const fallbackNeeded = limit - formattedPosts.length;
       
+      const fallbackMatch: any = { _id: { $nin: existingIds.map(id => new mongoose.Types.ObjectId(id)) } };
+      applyVisibilityFilter(fallbackMatch);
+
       const randomFallback = await ImagePost.aggregate([
-        { $match: { _id: { $nin: existingIds.map(id => new mongoose.Types.ObjectId(id)) } } },
+        { $match: fallbackMatch },
         { $sample: { size: fallbackNeeded } },
         {
           $lookup: {
@@ -1109,6 +1253,11 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
     const skip = (page - 1) * limit;
     const now = new Date();
     const twoDaysAgo = new Date(now.getTime() - 48 * 60 * 60 * 1000);
+    const withVisibility = (extra: Record<string, any> = {}) => {
+      const match = { ...extra };
+      applyVisibilityFilter(match);
+      return match;
+    };
 
     // Get user interests and following list if logged in
     let userInterestTags: string[] = [];
@@ -1136,7 +1285,7 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
     const fetchPromises: Promise<any>[] = [
       // 1. FOLLOWING: Posts from users you follow (priority - 3 per page)
       followingIds.length > 0 ? ImagePost.aggregate([
-        { $match: { user: { $in: followingIds }, isBoosted: { $ne: true } } },
+        { $match: withVisibility({ user: { $in: followingIds }, isBoosted: { $ne: true } }) },
         { $sort: { createdAt: -1 } }, // Newest first from followed users
         { $skip: skip },
         { $limit: 3 },
@@ -1147,7 +1296,7 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
 
       // 2. PERSONALIZED: Posts matching user interests (3 per page if user has interests) - exclude boosted
       userInterestTags.length > 0 ? ImagePost.aggregate([
-        { $match: { tags: { $in: userInterestTags }, isBoosted: { $ne: true } } },
+        { $match: withVisibility({ tags: { $in: userInterestTags }, isBoosted: { $ne: true } }) },
         {
           $addFields: {
             relevanceScore: {
@@ -1172,7 +1321,7 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
 
       // 3. TRENDING: High engagement posts (3 per page) - exclude boosted
       ImagePost.aggregate([
-        { $match: { isBoosted: { $ne: true } } },
+        { $match: withVisibility({ isBoosted: { $ne: true } }) },
         {
           $addFields: {
             engagementScore: {
@@ -1193,7 +1342,7 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
       ]),
 
       // 4. FRESH: New posts from last 48 hours (2 per page) - exclude boosted
-      ImagePost.find({ createdAt: { $gte: twoDaysAgo }, isBoosted: { $ne: true } })
+      ImagePost.find(withVisibility({ createdAt: { $gte: twoDaysAgo }, isBoosted: { $ne: true } }))
         .populate("user", "username userType profilePic")
         .sort({ createdAt: -1 })
         .skip(skip)
@@ -1201,7 +1350,7 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
         .lean(),
 
       // 5. BOOSTED: Seller promoted posts - 1 per page (industry standard like Instagram)
-      ImagePost.find({ isBoosted: true, boostExpiresAt: { $gt: now } })
+      ImagePost.find(withVisibility({ isBoosted: true, boostExpiresAt: { $gt: now } }))
         .populate("user", "username userType profilePic")
         .sort({ boostedAt: -1 })
         .skip(page - 1) // Rotate through boosted posts across pages
@@ -1211,7 +1360,7 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
       // 6. RANDOM/FALLBACK: Ensures infinite scroll never ends - exclude boosted
       // Uses $sample for true randomness (reshuffles automatically)
       ImagePost.aggregate([
-        { $match: { isBoosted: { $ne: true } } },
+        { $match: withVisibility({ isBoosted: { $ne: true } }) },
         { $sample: { size: 8 } }, // More random posts for variety
         { $lookup: { from: "users", localField: "user", foreignField: "_id", as: "user" } },
         { $unwind: "$user" },
@@ -1284,8 +1433,13 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
     // FALLBACK: If we don't have enough posts, add more random ones
     // This ensures infinite scroll NEVER ends
     if (allPosts.length < limit) {
+      const additionalMatch = withVisibility({
+        _id: { $nin: Array.from(seenIds).map(id => new mongoose.Types.ObjectId(id)) },
+        isBoosted: { $ne: true }
+      });
+
       const additionalRandom = await ImagePost.aggregate([
-        { $match: { _id: { $nin: Array.from(seenIds).map(id => new mongoose.Types.ObjectId(id)) }, isBoosted: { $ne: true } } },
+        { $match: additionalMatch },
         { $sample: { size: limit - allPosts.length + 3 } },
         { $lookup: { from: "users", localField: "user", foreignField: "_id", as: "user" } },
         { $unwind: "$user" },
@@ -1564,7 +1718,10 @@ export const getSimilarPosts = async (req: Request, res: Response) => {
     
     if (tags.length === 0) {
       // No tags - return recent posts as fallback
-      const fallbackPosts = await ImagePost.find({ _id: { $ne: postId } })
+      const fallbackMatch: any = { _id: { $ne: postId } };
+      applyVisibilityFilter(fallbackMatch);
+
+      const fallbackPosts = await ImagePost.find(fallbackMatch)
         .sort({ createdAt: -1 })
         .limit(limit)
         .populate('user', 'username profilePic userType')
@@ -1578,13 +1735,14 @@ export const getSimilarPosts = async (req: Request, res: Response) => {
     }
 
     // Find posts with matching tags, scored by overlap count
+    const similarMatch: any = {
+      _id: { $ne: new mongoose.Types.ObjectId(postId) },
+      tags: { $in: tags },
+    };
+    applyVisibilityFilter(similarMatch);
+
     const similarPosts = await ImagePost.aggregate([
-      {
-        $match: {
-          _id: { $ne: new mongoose.Types.ObjectId(postId) },
-          tags: { $in: tags },
-        },
-      },
+      { $match: similarMatch },
       {
         $addFields: {
           // Count how many tags match

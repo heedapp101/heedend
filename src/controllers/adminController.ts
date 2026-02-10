@@ -406,6 +406,193 @@ export const updateDwellTime = async (req: Request, res: Response) => {
 };
 
 /* =======================
+   AWARD / PROMOTION ADMIN
+   - Rank posts by engagement
+   - Mark as awarded/paid
+   - Hide/unhide from promo section
+======================= */
+export const getAwardCandidates = async (req: Request, res: Response) => {
+  try {
+    const days = Math.max(parseInt(req.query.days as string) || 30, 1);
+    const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
+    const tag = req.query.tag as string | undefined;
+    const includeAwarded = req.query.includeAwarded === "true";
+    const includeHidden = req.query.includeHidden === "true";
+
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - days);
+
+    const match: any = { createdAt: { $gte: startDate } };
+    if (tag) {
+      match.tags = { $regex: new RegExp(tag, "i") };
+    }
+    if (!includeAwarded) {
+      match.isAwarded = { $ne: true };
+    }
+    if (!includeHidden) {
+      match.$and = match.$and || [];
+      match.$and.push({ $or: [{ adminHidden: false }, { adminHidden: { $exists: false } }] });
+      match.$and.push({ $or: [{ isArchived: false }, { isArchived: { $exists: false } }] });
+    }
+
+    const candidates = await ImagePost.aggregate([
+      { $match: match },
+      {
+        $addFields: {
+          likesCount: { $size: { $ifNull: ["$likedBy", []] } },
+          engagementScore: {
+            $add: [
+              { $ifNull: ["$views", 0] },
+              { $multiply: [{ $size: { $ifNull: ["$likedBy", []] } }, 3] },
+            ],
+          },
+        },
+      },
+      { $sort: { engagementScore: -1, createdAt: -1 } },
+      { $limit: limit },
+      {
+        $lookup: {
+          from: "users",
+          localField: "user",
+          foreignField: "_id",
+          as: "user",
+        },
+      },
+      { $unwind: "$user" },
+      {
+        $project: {
+          _id: 1,
+          title: 1,
+          images: 1,
+          tags: 1,
+          views: 1,
+          likedBy: 1,
+          createdAt: 1,
+          engagementScore: 1,
+          "user._id": 1,
+          "user.username": 1,
+          "user.userType": 1,
+          "user.profilePic": 1,
+        },
+      },
+    ]);
+
+    res.status(200).json({
+      windowDays: days,
+      total: candidates.length,
+      candidates,
+    });
+  } catch (error: any) {
+    console.error("Get Award Candidates Error:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+export const updateAwardStatus = async (req: Request, res: Response) => {
+  try {
+    const { postId } = req.params as { postId: string };
+    const { isAwarded, status, amount, hidden, priority, adminHidden } = req.body as {
+      isAwarded?: boolean;
+      status?: string;
+      amount?: number | string;
+      hidden?: boolean;
+      priority?: number;
+      adminHidden?: boolean;
+    };
+
+    const validStatuses = ["pending", "approved", "paid", "rejected"];
+    if (status && !validStatuses.includes(status)) {
+      return res.status(400).json({ message: "Invalid award status" });
+    }
+
+    const update: any = {};
+
+    if (typeof adminHidden === "boolean") {
+      update.adminHidden = adminHidden;
+    }
+
+    if (typeof hidden === "boolean") {
+      update.awardHidden = hidden;
+    }
+
+    if (typeof priority === "number" && Number.isFinite(priority)) {
+      update.awardPriority = Math.floor(priority);
+    }
+
+    if (amount !== undefined) {
+      const parsed = Number(amount);
+      if (!Number.isFinite(parsed) || parsed < 0) {
+        return res.status(400).json({ message: "awardAmount must be 0 or greater" });
+      }
+      update.awardAmount = parsed;
+    }
+
+    if (typeof isAwarded === "boolean") {
+      update.isAwarded = isAwarded;
+      if (isAwarded) {
+        update.awardedAt = new Date();
+        if (!status) {
+          update.awardStatus = "paid"; // default for now
+          update.awardPaidAt = new Date();
+        }
+      } else {
+        update.awardStatus = "pending";
+        update.awardedAt = undefined;
+        update.awardPaidAt = undefined;
+        update.awardAmount = undefined;
+        update.awardHidden = false;
+        update.awardPriority = 0;
+      }
+    }
+
+    if (status) {
+      update.awardStatus = status;
+      if (status === "paid") {
+        update.awardPaidAt = new Date();
+        update.isAwarded = true;
+        if (!update.awardedAt) update.awardedAt = new Date();
+      }
+    }
+
+    const post = await ImagePost.findByIdAndUpdate(postId, update, { new: true });
+    if (!post) {
+      return res.status(404).json({ message: "Post not found" });
+    }
+
+    res.status(200).json({ success: true, post });
+  } catch (error: any) {
+    console.error("Update Award Error:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+export const updatePostVisibility = async (req: Request, res: Response) => {
+  try {
+    const { postId } = req.params as { postId: string };
+    const { hidden } = req.body as { hidden?: boolean };
+
+    if (typeof hidden !== "boolean") {
+      return res.status(400).json({ message: "hidden must be true or false" });
+    }
+
+    const post = await ImagePost.findByIdAndUpdate(
+      postId,
+      { adminHidden: hidden },
+      { new: true }
+    );
+
+    if (!post) {
+      return res.status(404).json({ message: "Post not found" });
+    }
+
+    res.status(200).json({ success: true, post });
+  } catch (error: any) {
+    console.error("Update Post Visibility Error:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/* =======================
    GET REPORTED POSTS
 ======================= */
 export const getReportedPosts = async (req: Request, res: Response) => {

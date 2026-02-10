@@ -7,6 +7,9 @@ import {
   getAllUsers,
   getRecommendationAnalytics,
   updateDwellTime,
+  getAwardCandidates,
+  updateAwardStatus,
+  updatePostVisibility,
   getReportedPosts,
   updateReportStatus,
   deleteReportedPost,
@@ -24,6 +27,11 @@ router.get("/users", requireAuth, adminMiddleware, getAllUsers);
 router.get("/approvals", requireAuth, adminMiddleware, getPendingApprovals);
 router.put("/approve/:id", requireAuth, adminMiddleware, approveUser);
 router.delete("/reject/:id", requireAuth, adminMiddleware, rejectUser);
+
+// ✅ AWARDS / PROMOTION
+router.get("/awards/candidates", requireAuth, adminMiddleware, getAwardCandidates);
+router.patch("/awards/:postId", requireAuth, adminMiddleware, updateAwardStatus);
+router.patch("/posts/:postId/visibility", requireAuth, adminMiddleware, updatePostVisibility);
 
 // ✅ REPORTS: Manage reported posts
 router.get("/reports", requireAuth, adminMiddleware, getReportedPosts);

@@ -82,7 +82,10 @@ export const searchAll = async (req: Request, res: Response) => {
     ).map((regex) => ({ tags: { $regex: regex } }));
 
     const basePostFilter = {
-      $or: [{ isArchived: false }, { isArchived: { $exists: false } }],
+      $and: [
+        { $or: [{ isArchived: false }, { isArchived: { $exists: false } }] },
+        { $or: [{ adminHidden: false }, { adminHidden: { $exists: false } }] },
+      ],
     };
 
     const searchUsers = async () => {
