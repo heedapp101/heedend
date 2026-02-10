@@ -622,7 +622,7 @@ export const getTrendingPosts = async (req: Request, res: Response) => {
     }
     applyVisibilityFilter(matchStage);
 
-    const sortStage =
+    const sortStage: Record<string, 1 | -1> =
       sort === "popular"
         ? { popularity: -1, createdAt: -1 }
         : sort === "recent"
