@@ -327,7 +327,7 @@ export const getChatById = async (req: AuthRequest, res: Response) => {
 export const sendMessage = async (req: AuthRequest, res: Response) => {
   try {
     const { chatId } = req.params;
-    const { content, messageType = "text", product, paymentRequest } = req.body;
+    const { content, messageType = "text", product, paymentRequest, inquiryId } = req.body;
     const userId = req.user?._id;
 
     if (!content && messageType === "text") {
@@ -349,15 +349,63 @@ export const sendMessage = async (req: AuthRequest, res: Response) => {
       return res.status(403).json({ message: "Not authorized" });
     }
 
+    const normalizeProduct = (rawProduct: any) => {
+      if (!rawProduct || !rawProduct.postId) return undefined;
+      if (!Types.ObjectId.isValid(String(rawProduct.postId))) return undefined;
+      return {
+        postId: new Types.ObjectId(rawProduct.postId),
+        title: rawProduct.title || "",
+        price: Number(rawProduct.price || 0),
+        image: rawProduct.image || "",
+      };
+    };
+
+    const isInquiryMessage = messageType === "inquiry";
+    const shouldIncludeProduct = messageType === "product" || isInquiryMessage;
+    const normalizedProduct = shouldIncludeProduct ? normalizeProduct(product) : undefined;
+
+    if (shouldIncludeProduct && !normalizedProduct) {
+      return res.status(400).json({ message: "Product information required" });
+    }
+
+    let finalInquiryId: Types.ObjectId | undefined;
+
+    if (isInquiryMessage && normalizedProduct) {
+      const newInquiry = {
+        _id: new Types.ObjectId(),
+        product: normalizedProduct,
+        status: "active" as const,
+        createdAt: new Date(),
+        firstMessageId: undefined as Types.ObjectId | undefined,
+      };
+      chat.inquiries.push(newInquiry);
+      chat.activeInquiryId = newInquiry._id;
+      finalInquiryId = newInquiry._id;
+    } else if (inquiryId && Types.ObjectId.isValid(String(inquiryId))) {
+      finalInquiryId = new Types.ObjectId(inquiryId);
+    } else if (chat.activeInquiryId) {
+      finalInquiryId = chat.activeInquiryId as Types.ObjectId;
+    }
+
     // Create message
     const senderMessageId = new Types.ObjectId();
+    if (isInquiryMessage) {
+      const latestInquiry = chat.inquiries.find(
+        (inquiry) => inquiry._id?.toString() === finalInquiryId?.toString()
+      );
+      if (latestInquiry) {
+        latestInquiry.firstMessageId = senderMessageId;
+      }
+    }
+
     const newMessage: IMessage = {
       _id: senderMessageId,
       chat: chat._id,
       sender: new Types.ObjectId(userId),
       content,
       messageType,
-      product: messageType === "product" ? product : undefined,
+      product: shouldIncludeProduct ? normalizedProduct : undefined,
+      inquiryId: finalInquiryId,
       paymentRequest: messageType === "payment-request" ? paymentRequest : undefined,
       isRead: false,
       createdAt: new Date(),
@@ -366,10 +414,12 @@ export const sendMessage = async (req: AuthRequest, res: Response) => {
     const savedMessageDoc = await Message.create(newMessage);
     chat.lastMessage = {
       content: messageType === "product"
-        ? `Product: ${product?.title || "Product"}`
-        : messageType === "image"
-          ? "Photo"
-          : content,
+        ? `Product: ${normalizedProduct?.title || "Product"}`
+        : messageType === "inquiry"
+          ? `Inquiry: ${normalizedProduct?.title || "Product"}`
+          : messageType === "image"
+            ? "Photo"
+            : content,
       sender: new Types.ObjectId(userId),
       createdAt: new Date(),
     };
@@ -394,42 +444,84 @@ export const sendMessage = async (req: AuthRequest, res: Response) => {
       }).select("autoReplyEnabled autoReplyMessage");
 
       if (businessRecipient && req.user?.userType !== "business") {
-        const autoReplyText =
-          businessRecipient.autoReplyMessage?.trim() ||
-          "Thanks for your message. We will reply soon.";
+        const autoReplyInquiryId = finalInquiryId || chat.activeInquiryId;
 
-        const now = Date.now();
-        const recentlySentSameReply = await Message.findOne({
-          chat: chat._id,
-          sender: businessRecipient._id,
-          content: autoReplyText,
-        })
-          .sort({ createdAt: -1 })
-          .lean();
-
-        if (!recentlySentSameReply || now - new Date(recentlySentSameReply.createdAt).getTime() >= 90 * 1000) {
-          const autoReplyMessage: IMessage = {
+        if (isInquiryMessage && normalizedProduct && autoReplyInquiryId) {
+          const existingAutoProductReply = await Message.findOne({
             chat: chat._id,
-            sender: new Types.ObjectId(businessRecipient._id),
-            content: autoReplyText,
-            messageType: "text",
-            isRead: false,
-            createdAt: new Date(),
-          } as IMessage;
+            sender: businessRecipient._id,
+            messageType: "product",
+            inquiryId: autoReplyInquiryId,
+          })
+            .sort({ createdAt: -1 })
+            .lean();
 
-          const savedAutoReply = await Message.create(autoReplyMessage);
-          chat.lastMessage = {
+          if (!existingAutoProductReply) {
+            const autoReplyCtaText = "Tap Buy Now or Negotiate below.";
+            const autoReplyMessage: IMessage = {
+              chat: chat._id,
+              sender: new Types.ObjectId(businessRecipient._id),
+              content: autoReplyCtaText,
+              messageType: "product",
+              product: normalizedProduct,
+              inquiryId: autoReplyInquiryId,
+              isRead: false,
+              createdAt: new Date(),
+            } as IMessage;
+
+            const savedAutoReply = await Message.create(autoReplyMessage);
+            chat.lastMessage = {
+              content: `Product: ${normalizedProduct.title || "Product"}`,
+              sender: new Types.ObjectId(businessRecipient._id),
+              createdAt: new Date(),
+            };
+            await chat.save();
+            emitRealtimeChatEvent(
+              chat,
+              businessRecipient._id.toString(),
+              savedAutoReply.toObject(),
+              activeInquiry
+            );
+          }
+        } else {
+          const autoReplyText =
+            businessRecipient.autoReplyMessage?.trim() ||
+            "Thanks for your message. We will reply soon.";
+
+          const now = Date.now();
+          const recentlySentSameReply = await Message.findOne({
+            chat: chat._id,
+            sender: businessRecipient._id,
             content: autoReplyText,
-            sender: new Types.ObjectId(businessRecipient._id),
-            createdAt: new Date(),
-          };
-          await chat.save();
-          emitRealtimeChatEvent(
-            chat,
-            businessRecipient._id.toString(),
-            savedAutoReply.toObject(),
-            activeInquiry
-          );
+          })
+            .sort({ createdAt: -1 })
+            .lean();
+
+          if (!recentlySentSameReply || now - new Date(recentlySentSameReply.createdAt).getTime() >= 90 * 1000) {
+            const autoReplyMessage: IMessage = {
+              chat: chat._id,
+              sender: new Types.ObjectId(businessRecipient._id),
+              content: autoReplyText,
+              messageType: "text",
+              inquiryId: finalInquiryId,
+              isRead: false,
+              createdAt: new Date(),
+            } as IMessage;
+
+            const savedAutoReply = await Message.create(autoReplyMessage);
+            chat.lastMessage = {
+              content: autoReplyText,
+              sender: new Types.ObjectId(businessRecipient._id),
+              createdAt: new Date(),
+            };
+            await chat.save();
+            emitRealtimeChatEvent(
+              chat,
+              businessRecipient._id.toString(),
+              savedAutoReply.toObject(),
+              activeInquiry
+            );
+          }
         }
       }
     } catch (autoReplyError) {
