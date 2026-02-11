@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import sharp from "sharp";
 import User from "../models/User.js";
+import LegalDocument from "../models/LegalDocument.js";
 import { getPresignedUrl } from "../cloudflare.js";
 import { uploadFile, s3 } from "../utils/cloudflareR2.js";
 import { processImage } from "../utils/ProcessImage.js";
@@ -193,6 +194,7 @@ interface SignupRequestBody {
   password: string;
   name: string;
   phone: string;
+  legalAcceptances?: { docId: string; version: number }[];
   
   // Optional / Specific fields
   bio?: string;
@@ -268,6 +270,7 @@ export const signup = async (
       password,
       name,
       phone,
+      legalAcceptances,
       bio,
       profilePic,
       bannerImg,
@@ -325,6 +328,27 @@ export const signup = async (
     // 3. Hash Password
     const hashedPassword = await bcrypt.hash(password, 10);
 
+    // 3b. Validate legal acceptance (required docs)
+    const requiredDocs = await LegalDocument.find({ isActive: true, isRequired: true })
+      .select("_id version");
+    if (requiredDocs.length > 0) {
+      if (!Array.isArray(legalAcceptances) || legalAcceptances.length === 0) {
+        return res.status(400).json({ message: "Legal acceptance required" });
+      }
+      const acceptanceMap = new Map<string, number>();
+      legalAcceptances.forEach((acc) => {
+        if (!acc?.docId) return;
+        acceptanceMap.set(String(acc.docId), Number(acc.version || 0));
+      });
+      const missing = requiredDocs.find((doc) => {
+        const acceptedVersion = acceptanceMap.get(String(doc._id)) || 0;
+        return acceptedVersion < doc.version;
+      });
+      if (missing) {
+        return res.status(400).json({ message: "Please accept the latest legal terms" });
+      }
+    }
+
     // 4. Create User
     const newUser = new User({
       userType,
@@ -366,6 +390,13 @@ export const signup = async (
       inventoryAlertThreshold: userType === "business"
         ? (inventoryAlertThreshold && Number(inventoryAlertThreshold) > 0 ? Number(inventoryAlertThreshold) : 3)
         : 3,
+      legalAcceptances: Array.isArray(legalAcceptances)
+        ? legalAcceptances.map((acc) => ({
+            docId: acc.docId,
+            version: acc.version,
+            acceptedAt: new Date(),
+          }))
+        : [],
     });
 
     await newUser.save();
@@ -410,6 +441,7 @@ export const signup = async (
         autoReplyMessage: newUser.autoReplyMessage,
         customQuickQuestion: newUser.customQuickQuestion,
         inventoryAlertThreshold: newUser.inventoryAlertThreshold,
+        legalAcceptances: newUser.legalAcceptances,
       },
     });
   } catch (error: any) {
@@ -516,6 +548,9 @@ export const login = async (
     });
 
     if (!user) return res.status(400).json({ message: "User not found" });
+    if ((user as any).isDeleted) {
+      return res.status(403).json({ message: "Account deleted" });
+    }
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch)
@@ -554,6 +589,7 @@ export const login = async (
         autoReplyMessage: user.autoReplyMessage,
         customQuickQuestion: user.customQuickQuestion,
         inventoryAlertThreshold: user.inventoryAlertThreshold,
+        legalAcceptances: user.legalAcceptances,
       },
     });
   } catch (error: any) {
@@ -685,6 +721,9 @@ export const googleAuth = async (
         }
         await user.save();
       }
+      if ((user as any).isDeleted) {
+        return res.status(403).json({ message: "Account deleted" });
+      }
     } else {
       // Create new user with Google data
       const username = normalizedEmail.split('@')[0] + '_' + Date.now().toString(36);
@@ -738,6 +777,7 @@ export const googleAuth = async (
         autoReplyMessage: user.autoReplyMessage,
         customQuickQuestion: user.customQuickQuestion,
         inventoryAlertThreshold: user.inventoryAlertThreshold,
+        legalAcceptances: user.legalAcceptances,
       },
     });
   } catch (error: any) {

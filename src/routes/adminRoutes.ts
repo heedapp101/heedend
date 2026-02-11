@@ -5,6 +5,7 @@ import {
   rejectUser,
   getDashboardStats,
   getAllUsers,
+  getDeletedUsers,
   getRecommendationAnalytics,
   updateDwellTime,
   getAwardCandidates,
@@ -24,6 +25,7 @@ router.get("/stats", requireAuth, adminMiddleware, getDashboardStats);
 router.get("/analytics/recommendations", requireAuth, adminMiddleware, getRecommendationAnalytics);
 router.post("/analytics/dwell-time", requireAuth, updateDwellTime); // Available to all authenticated users
 router.get("/users", requireAuth, adminMiddleware, getAllUsers);
+router.get("/users/deleted", requireAuth, adminMiddleware, getDeletedUsers);
 router.get("/approvals", requireAuth, adminMiddleware, getPendingApprovals);
 router.put("/approve/:id", requireAuth, adminMiddleware, approveUser);
 router.delete("/reject/:id", requireAuth, adminMiddleware, rejectUser);

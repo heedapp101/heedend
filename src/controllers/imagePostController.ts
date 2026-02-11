@@ -1165,15 +1165,18 @@ export const getExplore = async (req: Request, res: Response) => {
 
       // NOTE: When filtering by tag, do not inject "you might like" fallbacks.
 
-    // Even for non-tag explore, ensure infinite scroll with random fallback
-    if (!tag && formattedPosts.length < limit && page > 1) {
+    // Ensure infinite scroll with random fallback (even when tag is set)
+    if (formattedPosts.length < limit && page > 1) {
       const existingIds = formattedPosts.map(p => p._id.toString());
       const fallbackNeeded = limit - formattedPosts.length;
       
       const fallbackMatch: any = { _id: { $nin: existingIds.map(id => new mongoose.Types.ObjectId(id)) } };
+      if (tag) {
+        fallbackMatch.tags = { $regex: new RegExp(tag, "i") };
+      }
       applyVisibilityFilter(fallbackMatch);
 
-      const randomFallback = await ImagePost.aggregate([
+      let randomFallback = await ImagePost.aggregate([
         { $match: fallbackMatch },
         { $sample: { size: fallbackNeeded } },
         {
@@ -1204,10 +1207,49 @@ export const getExplore = async (req: Request, res: Response) => {
         },
       ]);
 
+      // If tag-specific fallback is empty, use global random to keep infinite
+      if (tag && randomFallback.length < fallbackNeeded) {
+        const globalMatch: any = { _id: { $nin: existingIds.map(id => new mongoose.Types.ObjectId(id)) } };
+        applyVisibilityFilter(globalMatch);
+
+        const globalFallback = await ImagePost.aggregate([
+          { $match: globalMatch },
+          { $sample: { size: fallbackNeeded - randomFallback.length } },
+          {
+            $lookup: {
+              from: "users",
+              localField: "user",
+              foreignField: "_id",
+              as: "user",
+            },
+          },
+          { $unwind: "$user" },
+          {
+            $project: {
+              _id: 1,
+              title: 1,
+              description: 1,
+              images: 1,
+              tags: 1,
+              views: 1,
+              likedBy: 1,
+              isBoosted: 1,
+              createdAt: 1,
+              "user._id": 1,
+              "user.username": 1,
+              "user.userType": 1,
+              "user.profilePic": 1,
+            },
+          },
+        ]);
+
+        randomFallback = [...randomFallback, ...globalFallback];
+      }
+
       const formattedRandom = randomFallback.map((post) => ({
         ...post,
         type: 'post',
-        source: 'random',
+        source: tag ? 'tag-fallback' : 'random',
         likes: post.likedBy?.length || 0,
       }));
 
@@ -1411,6 +1453,18 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
       }
     };
 
+    // NEW: Ensure freshest posts appear at top on page 1
+    const freshTop =
+      page === 1
+        ? [...freshPosts]
+            .sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+            .slice(0, 3)
+        : [];
+
+    if (freshTop.length > 0) {
+      addUnique(freshTop, "fresh");
+    }
+
     // Interleave: Following first (priority!), then personalized, trending, fresh, random
     // Boosted posts will be inserted naturally later
     const maxLen = Math.max(
@@ -1451,18 +1505,22 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
     // Limit to page size
     let feedPosts = allPosts.slice(0, limit);
 
-    // SHUFFLE first few posts on page 1 to prevent same post always at position 1
-    // Keep positions 0-4 shuffled for variety while maintaining relevance
+    // SHUFFLE first few posts on page 1 (after fresh-top) for variety
     if (page === 1 && feedPosts.length > 3) {
-      const shuffleCount = Math.min(5, feedPosts.length);
-      const toShuffle = feedPosts.slice(0, shuffleCount);
-      const rest = feedPosts.slice(shuffleCount);
-      // Fisher-Yates shuffle
-      for (let i = toShuffle.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [toShuffle[i], toShuffle[j]] = [toShuffle[j], toShuffle[i]];
+      const fixedCount = freshTop.length;
+      const available = feedPosts.length - fixedCount;
+      const shuffleCount = Math.min(5, available);
+      if (shuffleCount > 1) {
+        const head = feedPosts.slice(0, fixedCount);
+        const toShuffle = feedPosts.slice(fixedCount, fixedCount + shuffleCount);
+        const rest = feedPosts.slice(fixedCount + shuffleCount);
+        // Fisher-Yates shuffle
+        for (let i = toShuffle.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [toShuffle[i], toShuffle[j]] = [toShuffle[j], toShuffle[i]];
+        }
+        feedPosts = [...head, ...toShuffle, ...rest];
       }
-      feedPosts = [...toShuffle, ...rest];
     }
 
     // Format feed with likes count

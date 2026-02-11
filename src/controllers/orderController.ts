@@ -551,6 +551,14 @@ export const cancelOrder = async (req: AuthRequest, res: Response) => {
       });
     }
 
+    const cancellationWindowMs = 24 * 60 * 60 * 1000;
+    const placedAt = order.createdAt ? new Date(order.createdAt) : null;
+    if (!placedAt || Date.now() - placedAt.getTime() > cancellationWindowMs) {
+      return res.status(400).json({
+        message: "Order cannot be cancelled after 24 hours of placement.",
+      });
+    }
+
     order.status = "cancelled";
     order.cancellationReason = reason || "Cancelled by buyer";
     order.cancelledBy = new mongoose.Types.ObjectId(userId);

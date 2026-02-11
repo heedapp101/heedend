@@ -9,10 +9,14 @@ import {
   createCollection,
   toggleCollectionItem,
   updateUserProfile,
+  getMyPaymentDetails,
+  updatePaymentDetails,
+  getSellerPaymentDetails,
   getFollowersList,
   getFollowingList,
   savePushToken,
-  removePushToken
+  removePushToken,
+  deleteMyAccount
 } from "../controllers/userController.js";
 
 const router = Router();
@@ -22,6 +26,9 @@ router.get("/me", requireAuth, getCurrentUser);
 
 router.get("/profile/:id", getUserProfile);
 router.put("/profile", requireAuth, updateUserProfile);
+router.get("/payment-details", requireAuth, getMyPaymentDetails);
+router.put("/payment-details", requireAuth, updatePaymentDetails);
+router.get("/payment-details/:id", requireAuth, getSellerPaymentDetails);
 router.post("/follow/:id", requireAuth, followUser);
 router.post("/unfollow/:id", requireAuth, unfollowUser);
 router.get("/follow-status/:id", requireAuth, checkFollowStatus);
@@ -31,6 +38,7 @@ router.get("/:id/following", requireAuth, getFollowingList);
 // Push notification tokens
 router.post("/push-token", requireAuth, savePushToken);
 router.delete("/push-token", requireAuth, removePushToken);
+router.delete("/me", requireAuth, deleteMyAccount);
 
 router.post("/collections", requireAuth, createCollection);
 router.post("/collections/:collectionId/toggle", requireAuth, toggleCollectionItem);

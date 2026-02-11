@@ -53,6 +53,17 @@ export interface IUser extends Document {
   allIndiaDelivery?: boolean;
   freeShipping?: boolean;
   returnPolicy?: string; // e.g., '7 days', '15 days', 'No returns'
+
+  // --- Seller Payment Details ---
+  paymentDetails?: {
+    upiId?: string;
+    accountHolderName?: string;
+    accountNumber?: string;
+    ifsc?: string;
+    bankName?: string;
+    phone?: string;
+    note?: string;
+  };
   
   // --- Social Features ---
   followers: mongoose.Types.ObjectId[];
@@ -64,6 +75,19 @@ export interface IUser extends Document {
     platform: 'ios' | 'android' | 'unknown';
     createdAt: Date;
   }[];
+
+  // --- Legal Acceptance ---
+  legalAcceptances: {
+    docId: Types.ObjectId;
+    version: number;
+    acceptedAt: Date;
+  }[];
+
+  // --- Deletion ---
+  isDeleted: boolean;
+  deletedAt?: Date;
+  deletedReason?: string;
+  deletedBy?: "user" | "admin" | "system";
   
   // --- Timestamps (auto-added by Mongoose) ---
   createdAt: Date;
@@ -146,6 +170,17 @@ const userSchema = new Schema<IUser>(
     allIndiaDelivery: { type: Boolean, default: false },
     freeShipping: { type: Boolean, default: false },
     returnPolicy: { type: String, trim: true, default: '' },
+
+    // Seller Payment Details (shared with buyers at checkout)
+    paymentDetails: {
+      upiId: { type: String, trim: true, default: "" },
+      accountHolderName: { type: String, trim: true, default: "" },
+      accountNumber: { type: String, trim: true, default: "" },
+      ifsc: { type: String, trim: true, default: "" },
+      bankName: { type: String, trim: true, default: "" },
+      phone: { type: String, trim: true, default: "" },
+      note: { type: String, trim: true, default: "" },
+    },
     
     // --- Social Features ---
     followers: [{ type: Schema.Types.ObjectId, ref: "User" }],
@@ -157,6 +192,19 @@ const userSchema = new Schema<IUser>(
       platform: { type: String, enum: ['ios', 'android', 'unknown'], default: 'unknown' },
       createdAt: { type: Date, default: Date.now },
     }],
+
+    // --- Legal Acceptances ---
+    legalAcceptances: [{
+      docId: { type: Schema.Types.ObjectId, ref: "LegalDocument", required: true },
+      version: { type: Number, required: true, min: 1 },
+      acceptedAt: { type: Date, default: Date.now },
+    }],
+
+    // --- Deletion Flags ---
+    isDeleted: { type: Boolean, default: false, index: true },
+    deletedAt: { type: Date },
+    deletedReason: { type: String, trim: true },
+    deletedBy: { type: String, enum: ["user", "admin", "system"] },
   },
   { timestamps: true }
 );

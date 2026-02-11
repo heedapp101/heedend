@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { Types } from "mongoose";
+import User from "../models/User.js";
 
 export interface AuthRequest extends Request {
   user?: {
@@ -37,12 +38,19 @@ export const requireAuth = (
       return res.status(401).json({ message: "Unauthorized: Invalid token" });
     }
 
+    // Ensure user exists and is not deleted
+    const userRecord = await User.findById(decoded._id)
+      .select("_id username name userType email isDeleted");
+    if (!userRecord || userRecord.isDeleted) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
     (req as AuthRequest).user = {
-      _id: new Types.ObjectId(decoded._id),
-      username: decoded.username,
-      name: decoded.name,
-      userType: decoded.userType,
-      email: decoded.email,
+      _id: new Types.ObjectId(userRecord._id),
+      username: userRecord.username,
+      name: userRecord.name,
+      userType: userRecord.userType,
+      email: userRecord.email,
     };
 
     next();
@@ -80,13 +88,21 @@ export const optionalAuth = (
     const decoded = jwt.verify(token, JWT_SECRET) as any;
 
     if (decoded && decoded._id) {
-      (req as AuthRequest).user = {
-        _id: new Types.ObjectId(decoded._id),
-        username: decoded.username,
-        name: decoded.name,
-        userType: decoded.userType,
-        email: decoded.email,
-      };
+      // Attach user only if not deleted
+      User.findById(decoded._id)
+        .select("_id username name userType email isDeleted")
+        .then((userRecord) => {
+          if (!userRecord || userRecord.isDeleted) return;
+          (req as AuthRequest).user = {
+            _id: new Types.ObjectId(userRecord._id),
+            username: userRecord.username,
+            name: userRecord.name,
+            userType: userRecord.userType,
+            email: userRecord.email,
+          };
+        })
+        .finally(() => next());
+      return;
     }
 
     next();

@@ -3,10 +3,20 @@ import mongoose from "mongoose";
 import User from "../models/User.js";
 import Collection from "../models/Collection.js";
 import ImagePost from "../models/ImagePost.js";
+import Comment from "../models/Comment.js";
+import Notification from "../models/Notification.js";
 import { AuthRequest } from "../middleware/authMiddleware.js";
 import { INTEREST_WEIGHTS } from "../utils/interestUtils.js";
 import { interestBuffer } from "../utils/InterestBuffer.js";
 import { notifyFollow } from "../utils/notificationService.js";
+
+const hasPaymentDetails = (details?: Record<string, any>): boolean => {
+  if (!details) return false;
+  return Object.values(details).some((value) => {
+    if (typeof value !== "string") return false;
+    return value.trim().length > 0;
+  });
+};
 
 // GET CURRENT USER (for token validation)
 export const getCurrentUser = async (req: AuthRequest, res: Response) => {
@@ -14,7 +24,7 @@ export const getCurrentUser = async (req: AuthRequest, res: Response) => {
     if (!req.user) return res.status(401).json({ message: "Unauthorized" });
     
     const user = await User.findById(req.user._id).select("-password");
-    if (!user) {
+    if (!user || (user as any).isDeleted) {
       return res.status(404).json({ message: "User not found" });
     }
     
@@ -139,8 +149,8 @@ export const getUserProfile = async (req: Request, res: Response) => {
       return res.status(400).json({ message: "Invalid User ID format" });
     }
 
-    const user = await User.findById(id).select("-password");
-    if (!user) {
+    const user = await User.findById(id).select("-password -paymentDetails");
+    if (!user || (user as any).isDeleted) {
       return res.status(404).json({ message: "User not found" });
     }
 
@@ -475,6 +485,117 @@ export const savePushToken = async (req: AuthRequest, res: Response) => {
   }
 };
 
+// GET MY PAYMENT DETAILS (Seller)
+export const getMyPaymentDetails = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ message: "Unauthorized" });
+
+    const user = await User.findById(req.user._id).select("userType paymentDetails");
+    if (!user || (user as any).isDeleted) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    return res.json({
+      paymentDetails: (user as any).paymentDetails || {},
+      hasPaymentDetails: hasPaymentDetails((user as any).paymentDetails),
+    });
+  } catch (err) {
+    console.error("Get payment details error:", err);
+    res.status(500).json({ message: "Failed to fetch payment details" });
+  }
+};
+
+// UPDATE MY PAYMENT DETAILS (Seller)
+export const updatePaymentDetails = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ message: "Unauthorized" });
+
+    const user = await User.findById(req.user._id).select("userType paymentDetails");
+    if (!user || (user as any).isDeleted) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    if (user.userType !== "business") {
+      return res.status(403).json({ message: "Only business accounts can update payment details" });
+    }
+
+    const {
+      upiId,
+      accountHolderName,
+      accountNumber,
+      ifsc,
+      bankName,
+      phone,
+      note,
+    } = req.body || {};
+
+    const paymentDetails = {
+      upiId: upiId?.trim() || "",
+      accountHolderName: accountHolderName?.trim() || "",
+      accountNumber: accountNumber?.trim() || "",
+      ifsc: ifsc?.trim() || "",
+      bankName: bankName?.trim() || "",
+      phone: phone?.trim() || "",
+      note: note?.trim() || "",
+    };
+
+    const updatedUser = await User.findByIdAndUpdate(
+      req.user._id,
+      { paymentDetails },
+      { new: true, runValidators: true }
+    ).select("paymentDetails");
+
+    if (!updatedUser) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    res.json({
+      message: "Payment details updated",
+      paymentDetails: (updatedUser as any).paymentDetails || {},
+      hasPaymentDetails: hasPaymentDetails((updatedUser as any).paymentDetails),
+    });
+  } catch (err: any) {
+    console.error("Update payment details error:", err);
+    res.status(500).json({ message: err.message || "Failed to update payment details" });
+  }
+};
+
+// GET SELLER PAYMENT DETAILS (Buyer view)
+export const getSellerPaymentDetails = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ message: "Unauthorized" });
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid User ID format" });
+    }
+
+    const seller = await User.findById(id).select("username companyName userType paymentDetails");
+    if (!seller || (seller as any).isDeleted) {
+      return res.status(404).json({ message: "Seller not found" });
+    }
+
+    if (seller.userType !== "business") {
+      return res.status(404).json({ message: "Seller not found" });
+    }
+
+    const details = (seller as any).paymentDetails || {};
+
+    res.json({
+      seller: {
+        _id: seller._id,
+        username: seller.username,
+        companyName: seller.companyName,
+      },
+      paymentDetails: details,
+      hasPaymentDetails: hasPaymentDetails(details),
+    });
+  } catch (err) {
+    console.error("Get seller payment details error:", err);
+    res.status(500).json({ message: "Failed to fetch seller payment details" });
+  }
+};
+
 // Remove push token
 export const removePushToken = async (req: AuthRequest, res: Response) => {
   try {
@@ -499,5 +620,63 @@ export const removePushToken = async (req: AuthRequest, res: Response) => {
   } catch (err) {
     console.error("Remove Push Token Error:", err);
     res.status(500).json({ message: "Error removing push token" });
+  }
+};
+
+// DELETE MY ACCOUNT (Soft-delete with data cleanup)
+export const deleteMyAccount = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ message: "Unauthorized" });
+
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ message: "User not found" });
+    if ((user as any).isDeleted) {
+      return res.status(400).json({ message: "Account already deleted" });
+    }
+
+    const { reason } = req.body as { reason?: string };
+    const deletedAt = new Date();
+
+    // Remove user from followers/following lists
+    await User.updateMany(
+      { followers: user._id },
+      { $pull: { followers: user._id } }
+    );
+    await User.updateMany(
+      { following: user._id },
+      { $pull: { following: user._id } }
+    );
+
+    // Delete user-generated content
+    await ImagePost.deleteMany({ user: user._id });
+    await Collection.deleteMany({ user: user._id });
+    await Comment.deleteMany({ user: user._id });
+    await Notification.deleteMany({ $or: [{ recipient: user._id }, { sender: user._id }] });
+
+    // Anonymize the user and mark as deleted
+    const anonymizedEmail = `deleted+${user._id.toString()}@heed.app`;
+    const anonymizedUsername = `deleted_${user._id.toString().slice(-8)}`;
+
+    user.email = anonymizedEmail;
+    user.username = anonymizedUsername;
+    user.name = "Deleted User";
+    user.phone = "";
+    user.bio = "";
+    user.profilePic = "";
+    user.bannerImg = "";
+    user.location = "";
+    user.interests = [];
+    user.pushTokens = [];
+    (user as any).isDeleted = true;
+    (user as any).deletedAt = deletedAt;
+    (user as any).deletedReason = reason?.trim() || "user_request";
+    (user as any).deletedBy = "user";
+
+    await user.save();
+
+    res.status(200).json({ success: true, deletedAt });
+  } catch (err: any) {
+    console.error("Delete Account Error:", err);
+    res.status(500).json({ message: "Failed to delete account" });
   }
 };

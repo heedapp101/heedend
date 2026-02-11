@@ -47,11 +47,15 @@ export const getPendingApprovals = async (req: Request, res: Response) => {
 };
 export const getAllUsers = async (req: Request, res: Response) => {
   try {
-    const { role, search, sortBy, order } = req.query;
+    const { role, search, sortBy, order, includeDeleted } = req.query;
 
     // 1. Match Stage (Filtering)
     const matchStage: any = {};
     
+    if (includeDeleted !== "true") {
+      matchStage.isDeleted = { $ne: true };
+    }
+
     if (role && role !== "all") {
       matchStage.userType = role;
     }
@@ -90,6 +94,9 @@ export const getAllUsers = async (req: Request, res: Response) => {
           userType: 1,
           profilePic: 1,
           isVerified: 1,
+          isDeleted: 1,
+          deletedAt: 1,
+          deletedBy: 1,
           createdAt: 1,
           interests: 1,
           location: 1,
@@ -114,6 +121,39 @@ export const getAllUsers = async (req: Request, res: Response) => {
   }
 };
 
+export const getDeletedUsers = async (req: Request, res: Response) => {
+  try {
+    const { page = 1, limit = 20, search } = req.query;
+    const skip = (Number(page) - 1) * Number(limit);
+
+    const match: any = { isDeleted: true };
+    if (search) {
+      match.$or = [
+        { name: { $regex: search, $options: "i" } },
+        { email: { $regex: search, $options: "i" } },
+        { username: { $regex: search, $options: "i" } },
+      ];
+    }
+
+    const users = await User.find(match)
+      .select("name username email userType deletedAt deletedBy deletedReason createdAt")
+      .sort({ deletedAt: -1 })
+      .skip(skip)
+      .limit(Number(limit));
+
+    const total = await User.countDocuments(match);
+
+    res.status(200).json({
+      users,
+      total,
+      page: Number(page),
+      pages: Math.ceil(total / Number(limit)),
+    });
+  } catch (error: any) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 /* =======================
    ✅ NEW: DASHBOARD STATS
 ======================= */
@@ -121,6 +161,7 @@ export const getDashboardStats = async (req: Request, res: Response) => {
   try {
     // 1. Quick Stats
     const totalUsers = await User.countDocuments();
+    const deletedUsers = await User.countDocuments({ isDeleted: true });
     const businessUsers = await User.countDocuments({ userType: "business" });
     const pendingApprovals = await User.countDocuments({ userType: "business", isVerified: false });
     const totalPosts = await ImagePost.countDocuments();
@@ -149,6 +190,7 @@ export const getDashboardStats = async (req: Request, res: Response) => {
     res.status(200).json({
       stats: {
         totalUsers,
+        deletedUsers,
         businessUsers,
         pendingApprovals,
         totalPosts,

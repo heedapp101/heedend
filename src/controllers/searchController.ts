@@ -99,13 +99,15 @@ export const searchAll = async (req: Request, res: Response) => {
         isVerified: 1, companyName: 1, email: 1, followers: 1,
       };
 
+      const baseUserFilter = { userType: { $ne: "admin" }, isDeleted: { $ne: true } };
+
       // Build word-boundary regexes for individual words in multi-word queries
       const queryWords = query.split(/\s+/).filter(Boolean).map(w => escapeRegex(w));
       const wordRegexes = queryWords.map(w => new RegExp(w, "i"));
 
       // 1. Prefix regex search (most reliable — run first)
       const prefixUsers = await User.find({
-        userType: { $ne: "admin" },
+        ...baseUserFilter,
         $or: [
           { username: { $regex: prefixRegex } },
           { name: { $regex: prefixRegex } },
@@ -125,7 +127,7 @@ export const searchAll = async (req: Request, res: Response) => {
       let textUsers: any[] = [];
       try {
         textUsers = await User.find(
-          { $text: { $search: query }, _id: { $nin: prefixIds }, userType: { $ne: "admin" } }
+          { $text: { $search: query }, _id: { $nin: prefixIds }, ...baseUserFilter }
         )
           .select({ ...selectObj, textScore: { $meta: "textScore" } })
           .sort({ textScore: { $meta: "textScore" } })
@@ -139,7 +141,7 @@ export const searchAll = async (req: Request, res: Response) => {
       const combinedIds = [...prefixIds, ...textUsers.map((u: any) => u._id)];
       const containsUsers = await User.find({
         _id: { $nin: combinedIds },
-        userType: { $ne: "admin" },
+        ...baseUserFilter,
         $or: [
           { username: { $regex: containsRegex } },
           { name: { $regex: containsRegex } },
