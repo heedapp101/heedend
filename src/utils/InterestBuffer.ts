@@ -1,4 +1,4 @@
-import { updateUserInterests } from "./interestUtils.js";
+import { updateUserInterestsBatch } from "./interestUtils.js";
 
 /**
  * InterestBuffer: Batch & Flush Strategy
@@ -70,14 +70,11 @@ class InterestBuffer {
     const operations = Array.from(snapshot.entries()).map(
       async ([userId, tagMap]) => {
         try {
-          const entries = Array.from(tagMap.entries());
-
-          // Update the User ONE time with all accumulated tags
-          // We call updateUserInterests for each tag-score pair
-          // This is still much cheaper than calling on every view
-          for (const [tag, score] of entries) {
-            await updateUserInterests(userId, [tag], score);
-          }
+          const entries = Array.from(tagMap.entries()).map(([tag, score]) => ({
+            tag,
+            score,
+          }));
+          await updateUserInterestsBatch(userId, entries);
         } catch (err) {
           console.error(`Error flushing interests for user ${userId}:`, err);
         }

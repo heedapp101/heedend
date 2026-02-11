@@ -116,7 +116,7 @@ export const getOrCreateChat = async (req: AuthRequest, res: Response) => {
     let chat = await Chat.findOne({
       participants: { $all: [userId, recipientId] },
       isActive: true,
-    }).populate("participants", "username name profilePic userType isVerified");
+    }).populate("participants", "username name companyName profilePic userType isVerified");
 
     if (!chat) {
       // Create new chat
@@ -131,7 +131,7 @@ export const getOrCreateChat = async (req: AuthRequest, res: Response) => {
       // Populate after save
       chat = await Chat.findById(chat._id).populate(
         "participants",
-        "username name profilePic userType isVerified"
+        "username name companyName profilePic userType isVerified"
       );
     } else if (productContext && !chat.productContext) {
       // Update product context if not set
@@ -151,6 +151,9 @@ export const getUserChats = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user?._id;
     const { type } = req.query; // "business", "general", "admin", or undefined for all
+    const page = clampNumber(parseInt(req.query.page as string) || 1, 1, 1000);
+    const limit = clampNumber(parseInt(req.query.limit as string) || 20, 1, 100);
+    const skip = (page - 1) * limit;
 
     if (!userId) {
       return res.status(401).json({ message: "Unauthorized" });
@@ -165,10 +168,16 @@ export const getUserChats = async (req: AuthRequest, res: Response) => {
       query.chatType = type;
     }
 
-    const chats = await Chat.find(query)
-      .populate("participants", "username name profilePic userType isVerified companyName")
-      .populate("lastMessage.sender", "username name")
-      .sort({ "lastMessage.createdAt": -1, updatedAt: -1 });
+    const [chats, total] = await Promise.all([
+      Chat.find(query)
+      .populate("participants", "username name companyName profilePic userType isVerified")
+      .populate("lastMessage.sender", "username name companyName userType")
+      .sort({ "lastMessage.createdAt": -1, updatedAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
+      Chat.countDocuments(query),
+    ]);
 
     const chatIds = chats.map((chat) => chat._id);
     const unreadMap = new Map<string, number>();
@@ -213,7 +222,12 @@ export const getUserChats = async (req: AuthRequest, res: Response) => {
       };
     });
 
-    return res.status(200).json(formattedChats);
+    return res.status(200).json({
+      chats: formattedChats,
+      total,
+      page,
+      pages: Math.ceil(total / limit),
+    });
   } catch (error) {
     console.error("Error in getUserChats:", error);
     return res.status(500).json({ message: "Server error" });
@@ -230,7 +244,7 @@ export const getChatById = async (req: AuthRequest, res: Response) => {
     const skip = (page - 1) * limit;
 
     const chat = await Chat.findById(chatId)
-      .populate("participants", "username name profilePic userType isVerified companyName phone");
+      .populate("participants", "username name companyName profilePic userType isVerified phone");
 
     if (!chat) {
       return res.status(404).json({ message: "Chat not found" });
@@ -283,7 +297,7 @@ export const getChatById = async (req: AuthRequest, res: Response) => {
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
-        .populate("sender", "username name profilePic")
+        .populate("sender", "username name companyName userType profilePic")
         .lean(),
       Message.countDocuments({ chat: chat._id }),
     ]);
@@ -501,7 +515,7 @@ export const adminGetAllChats = async (req: AuthRequest, res: Response) => {
     let query: any = { chatType: "admin" };
 
     const chats = await Chat.find(query)
-      .populate("participants", "username name profilePic userType")
+      .populate("participants", "username name companyName profilePic userType")
       .sort({ "lastMessage.createdAt": -1 })
       .skip(skip)
       .limit(Number(limit));
@@ -535,7 +549,7 @@ export const adminInitiateChat = async (req: AuthRequest, res: Response) => {
       participants: { $all: [adminId, userId] },
       chatType: "admin",
       isActive: true,
-    }).populate("participants", "username name profilePic userType");
+    }).populate("participants", "username name companyName profilePic userType");
 
     if (!chat) {
       chat = new Chat({

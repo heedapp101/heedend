@@ -20,4 +20,9 @@ const commentSchema = new Schema<IComment>(
   { timestamps: true }
 );
 
+// Indexes for common access patterns
+commentSchema.index({ post: 1, createdAt: -1 });
+commentSchema.index({ parentId: 1, createdAt: -1 });
+commentSchema.index({ post: 1, parentId: 1 });
+
 export default mongoose.model<IComment>("Comment", commentSchema);

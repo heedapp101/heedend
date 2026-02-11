@@ -39,11 +39,9 @@ const imagePostSchema = new Schema(
 
     // ✅ View Counter
     views: { type: Number, default: 0 },
-    
-    // ✅ Track unique viewers (for accurate analytics)
-    viewedBy: [{ type: Schema.Types.ObjectId, ref: "User" }],
-
-    likedBy: [{ type: Schema.Types.ObjectId, ref: "User" }],
+    // ✅ Denormalized counters (avoid unbounded arrays)
+    likesCount: { type: Number, default: 0 },
+    commentsCount: { type: Number, default: 0 },
 
     // ✅ BOOSTING SYSTEM: For seller post promotion
     isBoosted: { type: Boolean, default: false },
@@ -90,8 +88,6 @@ imagePostSchema.index(
 );
 
 // ✅ SCALABILITY: Indexes for collaborative filtering & trending
-imagePostSchema.index({ likedBy: 1 });              // Collaborative filtering queries
-imagePostSchema.index({ viewedBy: 1 });             // Unique view tracking queries
 imagePostSchema.index({ views: -1 });               // Trending/popular sort
 imagePostSchema.index({ user: 1 });                 // Filter by user
 imagePostSchema.index({ views: -1, createdAt: -1 }); // Compound: trending + recency

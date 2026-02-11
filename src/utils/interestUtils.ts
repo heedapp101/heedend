@@ -28,17 +28,33 @@ export const updateUserInterests = async (
   weight: number
 ) => {
   if (!tags || tags.length === 0) return;
+  const entries = tags
+    .filter((t) => t && typeof t === "string")
+    .map((t) => ({ tag: t.trim().toLowerCase(), score: weight }))
+    .filter((e) => e.tag);
+
+  return updateUserInterestsBatch(userId, entries);
+};
+
+export const updateUserInterestsBatch = async (
+  userId: mongoose.Types.ObjectId | string,
+  entries: Array<{ tag: string; score: number }>
+) => {
+  if (!entries || entries.length === 0) return;
 
   try {
     const user = await User.findById(userId);
     if (!user) return;
 
-    // 1. Normalize new tags
-    const newTags = tags
-      .filter((t) => t && typeof t === "string")
-      .map((t) => t.trim().toLowerCase());
-
-    if (newTags.length === 0) return;
+    // 1. Normalize & aggregate entries
+    const entryMap = new Map<string, number>();
+    entries.forEach(({ tag, score }) => {
+      const normalized = tag.trim().toLowerCase();
+      if (!normalized) return;
+      const current = entryMap.get(normalized) || 0;
+      entryMap.set(normalized, current + (Number(score) || 0));
+    });
+    if (entryMap.size === 0) return;
 
     // 2. Map existing interests for fast lookup
     const interestMap = new Map<string, number>();
@@ -47,15 +63,12 @@ export const updateUserInterests = async (
     // Handle both old format (string[]) and new format (IInterest[])
     if (user.interests && Array.isArray(user.interests)) {
       user.interests.forEach((interest: any) => {
-        // Check if it's old format (plain string) or new format (object with tag/score)
         if (typeof interest === "string") {
-          // Old format: migrate with a default score
           const tag = interest.trim().toLowerCase();
           if (tag) {
-            interestMap.set(tag, 5 * DECAY_FACTOR); // Give existing interests a base score
+            interestMap.set(tag, 5 * DECAY_FACTOR);
           }
         } else if (interest && typeof interest === "object" && interest.tag) {
-          // New format: apply decay
           const tag = interest.tag.trim().toLowerCase();
           const score = typeof interest.score === "number" ? interest.score : 5;
           if (tag) {
@@ -66,12 +79,12 @@ export const updateUserInterests = async (
     }
 
     // 3. Add/Update Scores for new tags
-    newTags.forEach((tag) => {
+    entryMap.forEach((score, tag) => {
       const currentScore = interestMap.get(tag) || 0;
-      interestMap.set(tag, currentScore + weight);
+      interestMap.set(tag, currentScore + score);
     });
 
-    // 4. Convert back to array (filter out any empty tags)
+    // 4. Convert back to array
     const updatedInterests = Array.from(interestMap.entries())
       .filter(([tag]) => tag && tag.length > 0)
       .map(([tag, score]) => ({
@@ -80,11 +93,8 @@ export const updateUserInterests = async (
         lastInteracted: new Date(),
       }));
 
-    // 5. SORT & CAP (The Algorithm)
-    // Sort by Score DESC. If scores equal, use most recent.
+    // 5. SORT & CAP
     updatedInterests.sort((a, b) => b.score - a.score);
-
-    // Keep only Top 25 (Removes the "last" ones)
     const topInterests = updatedInterests.slice(0, MAX_INTERESTS);
 
     // 6. Save

@@ -76,6 +76,10 @@ export const searchAll = async (req: Request, res: Response) => {
     const escaped = escapeRegex(query);
     const prefixRegex = new RegExp(`^${escaped}`, "i");
     const containsRegex = new RegExp(escaped, "i");
+    const normalizedLower = query.toLowerCase();
+    const escapedLower = escapeRegex(normalizedLower);
+    const prefixLowerRegex = new RegExp(`^${escapedLower}`);
+    const containsLowerRegex = new RegExp(escapedLower);
     const fuzzyRegexes = buildQueryRegexes(query);
     const tagMatchConditions = (
       fuzzyRegexes.length > 0 ? fuzzyRegexes : [containsRegex]
@@ -92,30 +96,30 @@ export const searchAll = async (req: Request, res: Response) => {
       if (usersLimit === 0) return [];
 
       const selectFields =
-        "_id username name userType profilePic isVerified companyName email followers";
+        "_id username name userType profilePic isVerified companyName email followersCount";
 
       const selectObj: Record<string, any> = {
         _id: 1, username: 1, name: 1, userType: 1, profilePic: 1,
-        isVerified: 1, companyName: 1, email: 1, followers: 1,
+        isVerified: 1, companyName: 1, email: 1, followersCount: 1,
       };
 
       const baseUserFilter = { userType: { $ne: "admin" }, isDeleted: { $ne: true } };
 
       // Build word-boundary regexes for individual words in multi-word queries
       const queryWords = query.split(/\s+/).filter(Boolean).map(w => escapeRegex(w));
-      const wordRegexes = queryWords.map(w => new RegExp(w, "i"));
+      const wordLowerRegexes = queryWords.map(w => new RegExp(w.toLowerCase()));
 
       // 1. Prefix regex search (most reliable — run first)
       const prefixUsers = await User.find({
         ...baseUserFilter,
         $or: [
-          { username: { $regex: prefixRegex } },
-          { name: { $regex: prefixRegex } },
-          { companyName: { $regex: prefixRegex } },
-          { email: { $regex: prefixRegex } },
-          // Also match individual words against name parts
-          ...wordRegexes.map(wr => ({ name: { $regex: wr } })),
-          ...wordRegexes.map(wr => ({ username: { $regex: wr } })),
+          { usernameLower: { $regex: prefixLowerRegex } },
+          { nameLower: { $regex: prefixLowerRegex } },
+          { companyNameLower: { $regex: prefixLowerRegex } },
+          { emailLower: { $regex: prefixLowerRegex } },
+          // Also match individual words against name parts (lowercased fields)
+          ...wordLowerRegexes.map(wr => ({ nameLower: { $regex: wr } })),
+          ...wordLowerRegexes.map(wr => ({ usernameLower: { $regex: wr } })),
         ],
       })
         .select(selectFields)
@@ -143,10 +147,10 @@ export const searchAll = async (req: Request, res: Response) => {
         _id: { $nin: combinedIds },
         ...baseUserFilter,
         $or: [
-          { username: { $regex: containsRegex } },
-          { name: { $regex: containsRegex } },
-          { companyName: { $regex: containsRegex } },
-          { email: { $regex: containsRegex } },
+          { usernameLower: { $regex: containsLowerRegex } },
+          { nameLower: { $regex: containsLowerRegex } },
+          { companyNameLower: { $regex: containsLowerRegex } },
+          { emailLower: { $regex: containsLowerRegex } },
         ],
       })
         .select(selectFields)
@@ -170,7 +174,7 @@ export const searchAll = async (req: Request, res: Response) => {
         const username = String(u.username || "").toLowerCase();
         const name = String(u.name || "").toLowerCase();
         const company = String(u.companyName || "").toLowerCase();
-        const followersCount = Array.isArray(u.followers) ? u.followers.length : 0;
+        const followersCount = Number(u.followersCount || 0);
 
         // Split name into individual words for word-level matching
         const nameWords = name.split(/\s+/).filter(Boolean);
@@ -208,7 +212,7 @@ export const searchAll = async (req: Request, res: Response) => {
         return String(a.username || "").localeCompare(String(b.username || ""));
       });
 
-      return scored.slice(0, usersLimit).map(({ _score, followers, ...rest }: any) => rest);
+      return scored.slice(0, usersLimit).map(({ _score, followersCount: _fc, ...rest }: any) => rest);
     };
 
     const searchTags = async () => {
@@ -328,7 +332,7 @@ export const searchAll = async (req: Request, res: Response) => {
 
       return posts.map((post) => ({
         ...post,
-        likes: (post as any).likedBy?.length || 0,
+        likes: (post as any).likesCount || 0,
       }));
     };
 
@@ -351,7 +355,7 @@ export const searchAll = async (req: Request, res: Response) => {
 
       return similar.map((post) => ({
         ...post,
-        likes: (post as any).likedBy?.length || 0,
+        likes: (post as any).likesCount || 0,
       }));
     };
 

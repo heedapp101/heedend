@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import mongoose from "mongoose";
 import User from "../models/User.js";
+import Follow from "../models/Follow.js";
 import Collection from "../models/Collection.js";
 import ImagePost from "../models/ImagePost.js";
 import Comment from "../models/Comment.js";
@@ -9,6 +10,8 @@ import { AuthRequest } from "../middleware/authMiddleware.js";
 import { INTEREST_WEIGHTS } from "../utils/interestUtils.js";
 import { interestBuffer } from "../utils/InterestBuffer.js";
 import { notifyFollow } from "../utils/notificationService.js";
+import PostLike from "../models/PostLike.js";
+import PostView from "../models/PostView.js";
 
 const hasPaymentDetails = (details?: Record<string, any>): boolean => {
   if (!details) return false;
@@ -52,32 +55,36 @@ export const followUser = async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    // Check if already following
-    const currentUser = await User.findById(currentUserId);
-    const isAlreadyFollowing = currentUser?.following?.some(
-      (followingId: any) => followingId.toString() === id
-    );
-
-    if (isAlreadyFollowing) {
+    const existing = await Follow.findOne({ follower: currentUserId, following: id }).select("_id").lean();
+    if (existing) {
       return res.status(400).json({ message: "Already following this user" });
     }
 
-    // Update both users
-    await User.findByIdAndUpdate(currentUserId, { $addToSet: { following: id } });
-    await User.findByIdAndUpdate(id, { $addToSet: { followers: currentUserId } });
+    try {
+      await Follow.create({ follower: currentUserId, following: id });
+      await Promise.all([
+        User.updateOne({ _id: currentUserId }, { $inc: { followingCount: 1 } }),
+        User.updateOne({ _id: id }, { $inc: { followersCount: 1 } }),
+      ]);
+    } catch (err: any) {
+      if (err?.code === 11000) {
+        return res.status(400).json({ message: "Already following this user" });
+      }
+      throw err;
+    }
 
     // Send follow notification
     await notifyFollow(id, currentUserId.toString(), req.user.name || req.user.username || "User");
 
     // Get updated counts
-    const updatedTarget = await User.findById(id);
-    const updatedCurrent = await User.findById(currentUserId);
+    const updatedTarget = await User.findById(id).select("followersCount");
+    const updatedCurrent = await User.findById(currentUserId).select("followingCount");
 
     res.json({ 
       message: "Followed successfully",
       isFollowing: true,
-      followersCount: updatedTarget?.followers?.length || 0,
-      followingCount: updatedCurrent?.following?.length || 0,
+      followersCount: (updatedTarget as any)?.followersCount || 0,
+      followingCount: (updatedCurrent as any)?.followingCount || 0,
     });
   } catch (err) {
     console.error("Follow Error:", err);
@@ -102,19 +109,23 @@ export const unfollowUser = async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    // Update both users
-    await User.findByIdAndUpdate(currentUserId, { $pull: { following: id } });
-    await User.findByIdAndUpdate(id, { $pull: { followers: currentUserId } });
+    const deleted = await Follow.deleteOne({ follower: currentUserId, following: id });
+    if (deleted.deletedCount) {
+      await Promise.all([
+        User.updateOne({ _id: currentUserId }, { $inc: { followingCount: -1 }, $max: { followingCount: 0 } }),
+        User.updateOne({ _id: id }, { $inc: { followersCount: -1 }, $max: { followersCount: 0 } }),
+      ]);
+    }
 
     // Get updated counts
-    const updatedTarget = await User.findById(id);
-    const updatedCurrent = await User.findById(currentUserId);
+    const updatedTarget = await User.findById(id).select("followersCount");
+    const updatedCurrent = await User.findById(currentUserId).select("followingCount");
 
     res.json({ 
       message: "Unfollowed successfully",
       isFollowing: false,
-      followersCount: updatedTarget?.followers?.length || 0,
-      followingCount: updatedCurrent?.following?.length || 0,
+      followersCount: (updatedTarget as any)?.followersCount || 0,
+      followingCount: (updatedCurrent as any)?.followingCount || 0,
     });
   } catch (err) {
     console.error("Unfollow Error:", err);
@@ -128,10 +139,7 @@ export const checkFollowStatus = async (req: AuthRequest, res: Response) => {
     if (!req.user) return res.status(401).json({ message: "Unauthorized" });
     const { id } = req.params;
 
-    const currentUser = await User.findById(req.user._id);
-    const isFollowing = currentUser?.following?.some(
-      (followingId: any) => followingId.toString() === id
-    ) || false;
+    const isFollowing = !!(await Follow.exists({ follower: req.user._id, following: id }));
 
     res.json({ isFollowing });
   } catch (err) {
@@ -169,8 +177,8 @@ export const getUserProfile = async (req: Request, res: Response) => {
 
     res.json({
       user,
-      followersCount: user.followers ? user.followers.length : 0,
-      followingCount: user.following ? user.following.length : 0,
+      followersCount: (user as any).followersCount || 0,
+      followingCount: (user as any).followingCount || 0,
       collections
     });
 
@@ -283,11 +291,13 @@ export const updateUserProfile = async (req: AuthRequest, res: Response) => {
       showLocation: showLocation !== undefined ? showLocation : true, // ✅ Include showLocation toggle
       profilePic: profilePic || "",
       bannerImg: bannerImg || "",
+      nameLower: name.trim().toLowerCase(),
     };
 
     // Add business fields if business user
     if (req.user.userType === "business") {
       updateData.companyName = companyName?.trim() || "";
+      updateData.companyNameLower = updateData.companyName.toLowerCase();
       updateData.address = address?.trim() || "";
       updateData.gstNumber = gstNumber?.trim() || "";
       updateData.country = country?.trim() || "";
@@ -330,40 +340,67 @@ export const getFollowersList = async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     const currentUserId = req.user?._id;
+    const page = Math.max(parseInt(req.query.page as string) || 1, 1);
+    const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
+    const skip = (page - 1) * limit;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: "Invalid User ID format" });
     }
 
-    const user = await User.findById(id)
-      .populate({
-        path: 'followers',
-        select: 'username name profilePic userType companyName',
-      });
-
+    const user = await User.findById(id).select("_id");
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
 
-    // Add isFollowing status for each follower
-    let followers: any[] = user.followers || [];
-    
-    if (currentUserId) {
-      const currentUser = await User.findById(currentUserId);
-      const currentFollowing = currentUser?.following?.map((f: any) => f.toString()) || [];
-      
-      followers = (followers as any[]).map((follower: any) => ({
-        _id: follower._id,
-        username: follower.username,
-        name: follower.name,
-        profilePic: follower.profilePic,
-        userType: follower.userType,
-        companyName: follower.companyName,
-        isFollowing: currentFollowing.includes(follower._id.toString()),
-      }));
+    const total = await Follow.countDocuments({ following: user._id });
+    const followDocs = await Follow.find({ following: user._id })
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .select("follower")
+      .lean();
+
+    const followerIds = followDocs.map((f: any) => f.follower);
+    const followerUsers = await User.find({ _id: { $in: followerIds } })
+      .select("username name profilePic userType companyName")
+      .lean();
+
+    const userMap = new Map(
+      followerUsers.map((u: any) => [u._id.toString(), u])
+    );
+
+    let followingSet = new Set<string>();
+    if (currentUserId && followerIds.length > 0) {
+      const followingDocs = await Follow.find({
+        follower: currentUserId,
+        following: { $in: followerIds },
+      }).select("following").lean();
+      followingSet = new Set(followingDocs.map((d: any) => d.following.toString()));
     }
 
-    res.json({ users: followers });
+    const followers = followerIds
+      .map((id: any) => {
+        const u = userMap.get(id.toString());
+        if (!u) return null;
+        return {
+          _id: u._id,
+          username: u.username,
+          name: u.name,
+          profilePic: u.profilePic,
+          userType: u.userType,
+          companyName: u.companyName,
+          isFollowing: followingSet.has(u._id.toString()),
+        };
+      })
+      .filter(Boolean);
+
+    res.json({
+      users: followers,
+      total,
+      page,
+      pages: Math.ceil(total / limit),
+    });
   } catch (err) {
     console.error("Get Followers Error:", err);
     res.status(500).json({ message: "Error fetching followers" });
@@ -375,40 +412,67 @@ export const getFollowingList = async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     const currentUserId = req.user?._id;
+    const page = Math.max(parseInt(req.query.page as string) || 1, 1);
+    const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
+    const skip = (page - 1) * limit;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: "Invalid User ID format" });
     }
 
-    const user = await User.findById(id)
-      .populate({
-        path: 'following',
-        select: 'username name profilePic userType companyName',
-      });
-
+    const user = await User.findById(id).select("_id");
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
 
-    // Add isFollowing status for each user in following list
-    let following: any[] = user.following || [];
-    
-    if (currentUserId) {
-      const currentUser = await User.findById(currentUserId);
-      const currentFollowing = currentUser?.following?.map((f: any) => f.toString()) || [];
-      
-      following = (following as any[]).map((f: any) => ({
-        _id: f._id,
-        username: f.username,
-        name: f.name,
-        profilePic: f.profilePic,
-        userType: f.userType,
-        companyName: f.companyName,
-        isFollowing: currentFollowing.includes(f._id.toString()),
-      }));
+    const total = await Follow.countDocuments({ follower: user._id });
+    const followDocs = await Follow.find({ follower: user._id })
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .select("following")
+      .lean();
+
+    const followingIds = followDocs.map((f: any) => f.following);
+    const followingUsers = await User.find({ _id: { $in: followingIds } })
+      .select("username name profilePic userType companyName")
+      .lean();
+
+    const userMap = new Map(
+      followingUsers.map((u: any) => [u._id.toString(), u])
+    );
+
+    let followingSet = new Set<string>();
+    if (currentUserId && followingIds.length > 0) {
+      const followingDocsForCurrent = await Follow.find({
+        follower: currentUserId,
+        following: { $in: followingIds },
+      }).select("following").lean();
+      followingSet = new Set(followingDocsForCurrent.map((d: any) => d.following.toString()));
     }
 
-    res.json({ users: following });
+    const following = followingIds
+      .map((id: any) => {
+        const u = userMap.get(id.toString());
+        if (!u) return null;
+        return {
+          _id: u._id,
+          username: u.username,
+          name: u.name,
+          profilePic: u.profilePic,
+          userType: u.userType,
+          companyName: u.companyName,
+          isFollowing: followingSet.has(u._id.toString()),
+        };
+      })
+      .filter(Boolean);
+
+    res.json({
+      users: following,
+      total,
+      page,
+      pages: Math.ceil(total / limit),
+    });
   } catch (err) {
     console.error("Get Following Error:", err);
     res.status(500).json({ message: "Error fetching following list" });
@@ -637,21 +701,38 @@ export const deleteMyAccount = async (req: AuthRequest, res: Response) => {
     const { reason } = req.body as { reason?: string };
     const deletedAt = new Date();
 
-    // Remove user from followers/following lists
-    await User.updateMany(
-      { followers: user._id },
-      { $pull: { followers: user._id } }
-    );
-    await User.updateMany(
-      { following: user._id },
-      { $pull: { following: user._id } }
-    );
+    // Remove user from follow graph and decrement counts
+    const [followersDocs, followingDocs] = await Promise.all([
+      Follow.find({ following: user._id }).select("follower").lean(),
+      Follow.find({ follower: user._id }).select("following").lean(),
+    ]);
+
+    const followerIds = followersDocs.map((f: any) => f.follower);
+    const followingIds = followingDocs.map((f: any) => f.following);
+
+    await Promise.all([
+      followerIds.length
+        ? User.updateMany(
+            { _id: { $in: followerIds } },
+            { $inc: { followingCount: -1 }, $max: { followingCount: 0 } }
+          )
+        : Promise.resolve(),
+      followingIds.length
+        ? User.updateMany(
+            { _id: { $in: followingIds } },
+            { $inc: { followersCount: -1 }, $max: { followersCount: 0 } }
+          )
+        : Promise.resolve(),
+      Follow.deleteMany({ $or: [{ follower: user._id }, { following: user._id }] }),
+    ]);
 
     // Delete user-generated content
     await ImagePost.deleteMany({ user: user._id });
     await Collection.deleteMany({ user: user._id });
     await Comment.deleteMany({ user: user._id });
     await Notification.deleteMany({ $or: [{ recipient: user._id }, { sender: user._id }] });
+    await PostLike.deleteMany({ user: user._id });
+    await PostView.deleteMany({ user: user._id });
 
     // Anonymize the user and mark as deleted
     const anonymizedEmail = `deleted+${user._id.toString()}@heed.app`;

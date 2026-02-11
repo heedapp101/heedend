@@ -351,47 +351,45 @@ export const getAdAnalytics = async (req: AuthRequest, res: Response) => {
 
     const now = new Date();
 
-    // Overall stats
-    const totalAds = await Ad.countDocuments();
-    const activeAds = await Ad.countDocuments({
-      isActive: true,
-      startDate: { $lte: now },
-      endDate: { $gte: now }
-    });
-
-    // Aggregate stats
-    const aggregateStats = await Ad.aggregate([
-      {
-        $group: {
-          _id: null,
-          totalImpressions: { $sum: "$impressions" },
-          totalClicks: { $sum: "$clicks" },
-          totalRevenue: {
-            $sum: {
-              $cond: [{ $eq: ["$payment.status", "paid"] }, "$payment.amount", 0]
-            }
-          }
-        }
-      }
-    ]);
-
-    // Top performing ads
-    const topAds = await Ad.find()
-      .sort({ clicks: -1 })
-      .limit(5)
-      .select("title type impressions clicks payment.amount")
-      .lean();
-
-    // Ads by type
-    const byType = await Ad.aggregate([
-      {
-        $group: {
-          _id: "$type",
-          count: { $sum: 1 },
-          impressions: { $sum: "$impressions" },
-          clicks: { $sum: "$clicks" }
-        }
-      }
+    const [totalAds, activeAds, aggregateStats, topAds, byType] = await Promise.all([
+      Ad.countDocuments(),
+      Ad.countDocuments({
+        isActive: true,
+        startDate: { $lte: now },
+        endDate: { $gte: now },
+      }),
+      // Aggregate stats
+      Ad.aggregate([
+        {
+          $group: {
+            _id: null,
+            totalImpressions: { $sum: "$impressions" },
+            totalClicks: { $sum: "$clicks" },
+            totalRevenue: {
+              $sum: {
+                $cond: [{ $eq: ["$payment.status", "paid"] }, "$payment.amount", 0],
+              },
+            },
+          },
+        },
+      ]),
+      // Top performing ads
+      Ad.find()
+        .sort({ clicks: -1 })
+        .limit(5)
+        .select("title type impressions clicks payment.amount")
+        .lean(),
+      // Ads by type
+      Ad.aggregate([
+        {
+          $group: {
+            _id: "$type",
+            count: { $sum: 1 },
+            impressions: { $sum: "$impressions" },
+            clicks: { $sum: "$clicks" },
+          },
+        },
+      ]),
     ]);
 
     res.json({

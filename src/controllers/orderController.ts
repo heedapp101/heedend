@@ -4,6 +4,7 @@ import ImagePost from "../models/ImagePost.js";
 import User from "../models/User.js";
 import { Chat } from "../models/Chat.js";
 import Message, { IMessage } from "../models/Message.js";
+import OrderCounter from "../models/OrderCounter.js";
 import mongoose, { Types } from "mongoose";
 import { notifyOrderStatus, createNotification } from "../utils/notificationService.js";
 import {
@@ -16,19 +17,18 @@ interface AuthRequest extends Request {
 }
 
 // Generate unique order number: HEED-YYYYMMDD-XXXXX
+// Uses atomic counter to avoid race conditions
 const generateOrderNumber = async (): Promise<string> => {
   const today = new Date();
   const dateStr = today.toISOString().slice(0, 10).replace(/-/g, '');
-  
-  // Get count of orders today for sequential numbering
-  const startOfDay = new Date(today.setHours(0, 0, 0, 0));
-  const endOfDay = new Date(today.setHours(23, 59, 59, 999));
-  
-  const todayOrderCount = await Order.countDocuments({
-    createdAt: { $gte: startOfDay, $lte: endOfDay }
-  });
-  
-  const sequenceNum = String(todayOrderCount + 1).padStart(5, '0');
+
+  const counter = await OrderCounter.findOneAndUpdate(
+    { date: dateStr },
+    { $inc: { seq: 1 } },
+    { new: true, upsert: true, setDefaultsOnInsert: true }
+  );
+
+  const sequenceNum = String(counter.seq).padStart(5, '0');
   return `HEED-${dateStr}-${sequenceNum}`;
 };
 

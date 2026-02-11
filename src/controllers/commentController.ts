@@ -2,7 +2,6 @@ import { Response } from "express";
 import Comment from "../models/Comment.js";
 import ImagePost from "../models/ImagePost.js";
 import { AuthRequest } from "../middleware/authMiddleware.js";
-import mongoose from "mongoose";
 import { INTEREST_WEIGHTS } from "../utils/interestUtils.js";
 import { interestBuffer } from "../utils/InterestBuffer.js";
 import { notifyComment } from "../utils/notificationService.js";
@@ -11,30 +10,56 @@ import { notifyComment } from "../utils/notificationService.js";
 export const getComments = async (req: AuthRequest, res: Response) => {
   try {
     const { postId } = req.params;
+    const page = Math.max(parseInt(req.query.page as string) || 1, 1);
+    const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
+    const skip = (page - 1) * limit;
+    const currentUserId = req.user?._id?.toString();
     
-    // Fetch all comments for this post
-    const comments = await Comment.find({ post: postId })
-      .populate("user", "username profilePic isVerified") // Populate commenter info
-      .sort({ createdAt: -1 }); // Newest first
+    // Fetch paginated comments for this post
+    const [comments, total] = await Promise.all([
+      Comment.find({ post: postId })
+        .populate("user", "username name companyName userType profilePic isVerified") // Populate commenter info
+        .sort({ createdAt: -1 }) // Newest first
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Comment.countDocuments({ post: postId }),
+    ]);
 
     // Transform for frontend
-    const formattedComments = comments.map(c => ({
-      id: c._id,
-      userId: (c.user as any)._id,
-      user: {
-        id: (c.user as any)._id,
-        username: (c.user as any).username,
-        avatarUrl: (c.user as any).profilePic || "", 
-        isVerified: (c.user as any).isVerified
-      },
-      text: c.text,
-      createdAt: c.createdAt,
-      likesCount: c.likes.length,
-      isLikedByMe: req.user ? c.likes.includes(req.user._id) : false,
-      parentId: c.parentId,
-    }));
+    const formattedComments = comments.map((c: any) => {
+      const user = c.user || {};
+      const likes = Array.isArray(c.likes) ? c.likes : [];
+      const isLikedByMe = currentUserId
+        ? likes.some((id: any) => id?.toString() === currentUserId)
+        : false;
 
-    res.json(formattedComments);
+      return {
+        id: c._id,
+        userId: user._id,
+        user: {
+          id: user._id,
+          username: user.username,
+          name: user.name,
+          companyName: user.companyName,
+          userType: user.userType,
+          avatarUrl: user.profilePic || "",
+          isVerified: user.isVerified,
+        },
+        text: c.text,
+        createdAt: c.createdAt,
+        likesCount: likes.length,
+        isLikedByMe,
+        parentId: c.parentId,
+      };
+    });
+
+    res.json({
+      comments: formattedComments,
+      total,
+      page,
+      pages: Math.ceil(total / limit),
+    });
   } catch (err) {
     res.status(500).json({ message: "Error fetching comments" });
   }
@@ -59,6 +84,9 @@ export const addComment = async (req: AuthRequest, res: Response) => {
       parentId: parentId || null
     });
 
+    // Increment comments count
+    await ImagePost.updateOne({ _id: postId }, { $inc: { commentsCount: 1 } });
+
     // 🚀 BUFFERED: Add Comment Weight (batched every 30s)
     if (post.tags && post.tags.length > 0) {
       interestBuffer.add(req.user._id.toString(), post.tags, INTEREST_WEIGHTS.COMMENT);
@@ -78,7 +106,7 @@ export const addComment = async (req: AuthRequest, res: Response) => {
     }
 
     // Populate user immediately for the UI
-    await newComment.populate("user", "username profilePic isVerified");
+    await newComment.populate("user", "username name companyName userType profilePic isVerified");
 
     res.status(201).json({
       id: newComment._id,
@@ -86,6 +114,9 @@ export const addComment = async (req: AuthRequest, res: Response) => {
       user: {
         id: req.user._id,
         username: (newComment.user as any).username,
+        name: (newComment.user as any).name,
+        companyName: (newComment.user as any).companyName,
+        userType: (newComment.user as any).userType,
         avatarUrl: (newComment.user as any).profilePic || "",
         isVerified: (newComment.user as any).isVerified
       },
@@ -116,21 +147,32 @@ export const deleteComment = async (req: AuthRequest, res: Response) => {
       return res.status(403).json({ message: "Access denied" });
     }
 
-    const idsToDelete: mongoose.Types.ObjectId[] = [comment._id as mongoose.Types.ObjectId];
-    for (let i = 0; i < idsToDelete.length; i++) {
-      const childComments = await Comment.find({ parentId: idsToDelete[i] })
-        .select("_id")
-        .lean();
+    const aggregateResult = await Comment.aggregate([
+      { $match: { _id: comment._id } },
+      {
+        $graphLookup: {
+          from: "comments",
+          startWith: "$_id",
+          connectFromField: "_id",
+          connectToField: "parentId",
+          as: "descendants",
+          restrictSearchWithMatch: { post: comment.post },
+        },
+      },
+      {
+        $project: {
+          ids: { $concatArrays: [["$_id"], "$descendants._id"] },
+        },
+      },
+    ]);
 
-      for (const child of childComments) {
-        const childId = child._id as mongoose.Types.ObjectId;
-        if (!idsToDelete.some((id) => id.equals(childId))) {
-          idsToDelete.push(childId);
-        }
-      }
-    }
+    const idsToDelete = aggregateResult[0]?.ids || [comment._id];
 
     await Comment.deleteMany({ _id: { $in: idsToDelete } });
+    await ImagePost.updateOne(
+      { _id: comment.post },
+      { $inc: { commentsCount: -1 * idsToDelete.length }, $max: { commentsCount: 0 } }
+    );
     res.json({ message: "Deleted successfully", deletedCount: idsToDelete.length });
 
   } catch (err) {

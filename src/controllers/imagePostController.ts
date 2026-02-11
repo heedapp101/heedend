@@ -4,6 +4,9 @@ import ImagePost from "../models/ImagePost.js";
 import Ad from "../models/Ad.js";
 import RecommendationAnalytics from "../models/RecommendationAnalytics.js";
 import Report from "../models/Report.js";
+import PostLike from "../models/PostLike.js";
+import PostView from "../models/PostView.js";
+import Follow from "../models/Follow.js";
 import { processImage } from "../utils/ProcessImage.js";
 import sharp from "sharp";
 import { uploadFile } from "../utils/cloudflareR2.js";
@@ -235,7 +238,7 @@ export const getAllImagePosts = async (req: Request, res: Response) => {
     applyVisibilityFilter(baseMatch);
 
     const posts = await ImagePost.find(baseMatch)
-      .populate("user", "username userType requireChatBeforePurchase")
+      .populate("user", "username name companyName userType requireChatBeforePurchase")
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
@@ -243,7 +246,7 @@ export const getAllImagePosts = async (req: Request, res: Response) => {
 
     const formatted = posts.map(post => ({
       ...post,
-      likes: (post as any).likedBy?.length || 0,
+      likes: (post as any).likesCount || 0,
     }));
 
     res.json(formatted);
@@ -263,8 +266,11 @@ export const getSellerStats = async (req: AuthRequest, res: Response) => {
 
     const totalPosts = await ImagePost.countDocuments({ user: userId });
     
-    const posts = await ImagePost.find({ user: userId });
-    const totalLikes = posts.reduce((acc, post) => acc + (post.likedBy?.length || 0), 0);
+    const totalLikesAgg = await ImagePost.aggregate([
+      { $match: { user: userId } },
+      { $group: { _id: null, totalLikes: { $sum: { $ifNull: ["$likesCount", 0] } } } },
+    ]);
+    const totalLikes = totalLikesAgg[0]?.totalLikes || 0;
 
     const postGrowth = await ImagePost.aggregate([
       { $match: { user: userId } },
@@ -300,7 +306,7 @@ export const getSinglePost = async (req: AuthRequest, res: Response) => {
     // First get the post to check if user already viewed
     let post = await ImagePost.findById(id).populate(
       "user",
-      "username userType name profilePic requireChatBeforePurchase autoReplyEnabled autoReplyMessage customQuickQuestion inventoryAlertThreshold cashOnDeliveryAvailable"
+      "username userType name companyName profilePic requireChatBeforePurchase autoReplyEnabled autoReplyMessage customQuickQuestion inventoryAlertThreshold cashOnDeliveryAvailable"
     );
     if (!post) return res.status(404).json({ message: "Not found" });
 
@@ -314,21 +320,27 @@ export const getSinglePost = async (req: AuthRequest, res: Response) => {
 
     // ✅ UNIQUE VIEWS: Only count view if user hasn't viewed before
     // Anonymous users always count (can't track them)
-    // Logged-in users only count once
+    // Logged-in users only count once (via PostView collection)
     const userId = req.user?._id;
-    const hasViewed = userId && post.viewedBy?.some(vid => vid.toString() === userId.toString());
-    
-    if (!hasViewed) {
-      // Increment view and add to viewedBy if logged in
-      const updateQuery: any = { $inc: { views: 1 } };
-      if (userId) {
-        updateQuery.$addToSet = { viewedBy: userId };
-      }
-      post = await ImagePost.findByIdAndUpdate(id, updateQuery, { new: true })
-        .populate(
-          "user",
-          "username userType name profilePic requireChatBeforePurchase autoReplyEnabled autoReplyMessage customQuickQuestion inventoryAlertThreshold cashOnDeliveryAvailable"
-        ) as any;
+    let shouldIncrementView = false;
+
+    if (userId) {
+      const result = await PostView.updateOne(
+        { post: post._id, user: userId },
+        { $setOnInsert: { post: post._id, user: userId } },
+        { upsert: true }
+      );
+      shouldIncrementView = (result as any)?.upsertedCount > 0;
+    } else {
+      shouldIncrementView = true;
+    }
+
+    if (shouldIncrementView) {
+      await ImagePost.updateOne({ _id: post._id }, { $inc: { views: 1 } });
+      post = await ImagePost.findById(id).populate(
+        "user",
+        "username userType name companyName profilePic requireChatBeforePurchase autoReplyEnabled autoReplyMessage customQuickQuestion inventoryAlertThreshold cashOnDeliveryAvailable"
+      ) as any;
     }
 
     if (!post) {
@@ -351,9 +363,14 @@ export const getSinglePost = async (req: AuthRequest, res: Response) => {
       }
     }
 
+    const isLiked = req.user
+      ? !!(await PostLike.exists({ post: post._id, user: req.user._id }))
+      : false;
+
     res.json({
       ...post.toObject(),
-      likes: post.likedBy?.length || 0,
+      likes: (post as any).likesCount || 0,
+      isLiked,
     });
   } catch (err) {
     console.error("Get Post Error:", err);
@@ -376,47 +393,67 @@ export const toggleLikePost = async (req: AuthRequest, res: Response) => {
     }
 
     const userId = req.user._id.toString();
-    const index = post.likedBy.findIndex((id) => id.toString() === userId);
     const source = req.query.source as string;
 
-    if (index !== -1) {
-      post.likedBy.splice(index, 1); // Unlike
+    const existingLike = await PostLike.findOne({ post: post._id, user: req.user._id })
+      .select("_id")
+      .lean();
+
+    let isLiked = false;
+
+    if (existingLike) {
+      await PostLike.deleteOne({ _id: existingLike._id });
+      await ImagePost.updateOne(
+        { _id: post._id },
+        { $inc: { likesCount: -1 }, $max: { likesCount: 0 } }
+      );
+      isLiked = false;
     } else {
-      post.likedBy.push(new mongoose.Types.ObjectId(userId)); // Like
-
-      // 🚀 BUFFERED: Add Like Weight (batched every 30s)
-      if (post.tags && post.tags.length > 0) {
-        interestBuffer.add(req.user._id.toString(), post.tags, INTEREST_WEIGHTS.LIKE);
+      try {
+        await PostLike.create({ post: post._id, user: req.user._id });
+        await ImagePost.updateOne({ _id: post._id }, { $inc: { likesCount: 1 } });
+        isLiked = true;
+      } catch (err: any) {
+        if (err?.code === 11000) {
+          isLiked = true;
+        } else {
+          throw err;
+        }
       }
 
-      // 📊 Track analytics for likes (fire-and-forget, no await)
-      if (source && ["recommended", "explore", "trending", "search", "profile"].includes(source)) {
-        RecommendationAnalytics.create({
-          userId: req.user._id,
-          postId: post._id,
-          source: source as any,
-          action: "like",
-          clickedAt: new Date(),
-        }).catch(err => console.error("Analytics tracking error:", err));
-      }
+      if (isLiked) {
+        // 🚀 BUFFERED: Add Like Weight (batched every 30s)
+        if (post.tags && post.tags.length > 0) {
+          interestBuffer.add(req.user._id.toString(), post.tags, INTEREST_WEIGHTS.LIKE);
+        }
 
-      // 🔔 Send notification to post owner (if not self-like)
-      const postOwnerId = post.user.toString();
-      if (postOwnerId !== userId) {
-        await notifyLike(
-          postOwnerId,
-          userId,
-          req.user.name || req.user.username || "User",
-          post._id.toString(),
-          post.title
-        );
+        // 📊 Track analytics for likes (fire-and-forget, no await)
+        if (source && ["recommended", "explore", "trending", "search", "profile"].includes(source)) {
+          RecommendationAnalytics.create({
+            userId: req.user._id,
+            postId: post._id,
+            source: source as any,
+            action: "like",
+            clickedAt: new Date(),
+          }).catch(err => console.error("Analytics tracking error:", err));
+        }
+
+        // 🔔 Send notification to post owner (if not self-like)
+        const postOwnerId = post.user.toString();
+        if (postOwnerId !== userId) {
+          await notifyLike(
+            postOwnerId,
+            userId,
+            req.user.name || req.user.username || "User",
+            post._id.toString(),
+            post.title
+          );
+        }
       }
     }
 
-    await post.save();
-
     const populated = await ImagePost.findById(post._id)
-      .populate("user", "username userType requireChatBeforePurchase");
+      .populate("user", "username name companyName userType requireChatBeforePurchase");
 
     if (!populated) {
       return res.status(404).json({ message: "Post not found after update" });
@@ -424,7 +461,8 @@ export const toggleLikePost = async (req: AuthRequest, res: Response) => {
 
     res.json({
       ...populated.toObject(),
-      likes: populated.likedBy.length,
+      likes: (populated as any).likesCount || 0,
+      isLiked,
     });
 
   } catch (err) {
@@ -453,12 +491,12 @@ export const getMyImagePosts = async (req: AuthRequest, res: Response) => {
     }
 
     const posts = await ImagePost.find(filter)
-      .populate("user", "username userType requireChatBeforePurchase")
+      .populate("user", "username name companyName userType requireChatBeforePurchase")
       .sort({ createdAt: -1 });
 
     const formatted = posts.map(post => ({
       ...post.toObject(),
-      likes: post.likedBy?.length || 0,
+      likes: (post as any).likesCount || 0,
     }));
 
     res.json(formatted);
@@ -486,12 +524,12 @@ export const getPostsByUser = async (req: Request, res: Response) => {
     applyVisibilityFilter(match);
 
     const posts = await ImagePost.find(match)
-      .populate("user", "username userType requireChatBeforePurchase")
+      .populate("user", "username name companyName userType requireChatBeforePurchase")
       .sort({ createdAt: -1 });
 
     const formatted = posts.map(post => ({
       ...post.toObject(),
-      likes: post.likedBy?.length || 0,
+      likes: (post as any).likesCount || 0,
     }));
 
     res.json(formatted);
@@ -530,7 +568,7 @@ export const searchPosts = async (req: Request, res: Response) => {
         textMatch,
         { score: { $meta: "textScore" } } // Include relevance score
       )
-        .populate("user", "username userType profilePic")
+        .populate("user", "username name companyName userType profilePic")
         .sort({ score: { $meta: "textScore" }, views: -1 }) // Sort by relevance, then views
         .skip(skip)
         .limit(limit)
@@ -553,7 +591,7 @@ export const searchPosts = async (req: Request, res: Response) => {
       applyVisibilityFilter(regexMatch);
 
       posts = await ImagePost.find(regexMatch)
-        .populate("user", "username userType profilePic")
+        .populate("user", "username name companyName userType profilePic")
         .sort({ views: -1, createdAt: -1 })
         .skip(skip)
         .limit(limit)
@@ -562,7 +600,7 @@ export const searchPosts = async (req: Request, res: Response) => {
 
     const formatted = posts.map((post) => ({
       ...post,
-      likes: (post as any).likedBy?.length || 0,
+      likes: (post as any).likesCount || 0,
     }));
 
     res.json(formatted);
@@ -639,7 +677,7 @@ export const getTrendingPosts = async (req: Request, res: Response) => {
           popularity: {
             $add: [
               { $ifNull: ["$views", 0] },
-              { $multiply: [{ $size: { $ifNull: ["$likedBy", []] } }, 5] },
+              { $multiply: [{ $ifNull: ["$likesCount", 0] }, 5] },
             ],
           },
         },
@@ -674,10 +712,12 @@ export const getTrendingPosts = async (req: Request, res: Response) => {
           images: 1,
           tags: 1,
           views: 1,
-          likedBy: 1,
+          likesCount: 1,
           createdAt: 1,
           "user._id": 1,
           "user.username": 1,
+          "user.name": 1,
+          "user.companyName": 1,
           "user.userType": 1,
           "user.profilePic": 1,
         },
@@ -686,7 +726,7 @@ export const getTrendingPosts = async (req: Request, res: Response) => {
 
     const formattedPosts = posts.map((post) => ({
       ...post,
-      likes: post.likedBy?.length || 0,
+      likes: post.likesCount || 0,
     }));
 
     const tagMatch: any = { ...matchStage };
@@ -738,7 +778,7 @@ export const getAwardedPosts = async (req: Request, res: Response) => {
     applyVisibilityFilter(match);
 
     const posts = await ImagePost.find(match)
-      .populate("user", "username userType profilePic")
+      .populate("user", "username name companyName userType profilePic")
       .sort({ awardPriority: -1, awardedAt: -1, createdAt: -1 })
       .skip(skip)
       .limit(limit)
@@ -746,7 +786,7 @@ export const getAwardedPosts = async (req: Request, res: Response) => {
 
     const formatted = posts.map(post => ({
       ...post,
-      likes: (post as any).likedBy?.length || 0,
+      likes: (post as any).likesCount || 0,
     }));
 
     res.json({
@@ -803,7 +843,7 @@ export const getRecommendedPosts = async (req: AuthRequest, res: Response) => {
             // Simple engagement score for anonymous users
             engagementScore: {
               $add: [
-                { $multiply: [{ $size: { $ifNull: ["$likedBy", []] } }, 3] },
+                { $multiply: [{ $ifNull: ["$likesCount", 0] }, 3] },
                 { $multiply: ["$views", 1] },
               ],
             },
@@ -854,10 +894,12 @@ export const getRecommendedPosts = async (req: AuthRequest, res: Response) => {
             images: 1,
             tags: 1,
             views: 1,
-            likedBy: 1,
+            likesCount: 1,
             createdAt: 1,
             "user._id": 1,
             "user.username": 1,
+            "user.name": 1,
+            "user.companyName": 1,
             "user.userType": 1,
             "user.profilePic": 1,
           },
@@ -866,7 +908,7 @@ export const getRecommendedPosts = async (req: AuthRequest, res: Response) => {
 
       const formatted = posts.map((post) => ({
         ...post,
-        likes: post.likedBy?.length || 0,
+        likes: post.likesCount || 0,
       }));
 
       return res.json(formatted);
@@ -884,11 +926,11 @@ export const getRecommendedPosts = async (req: AuthRequest, res: Response) => {
         .map((i: any) => (typeof i === "string" ? i : i.tag)) || [];
 
     // Get user's liked posts for collaborative filtering
-    const userLikedPosts = await ImagePost.find({
-      likedBy: req.user._id,
-    }).select("_id").lean();
-    
-    const userLikedPostIds = userLikedPosts.map((p) => p._id);
+    const userLikedPosts = await PostLike.find({ user: req.user._id })
+      .select("post")
+      .lean();
+
+    const userLikedPostIds = userLikedPosts.map((p: any) => p.post);
 
     // C. If user has no interests yet, return 'Trending'
     if (topTags.length === 0 && userLikedPostIds.length === 0) {
@@ -901,7 +943,7 @@ export const getRecommendedPosts = async (req: AuthRequest, res: Response) => {
           $addFields: {
             engagementScore: {
               $add: [
-                { $multiply: [{ $size: { $ifNull: ["$likedBy", []] } }, 3] },
+                { $multiply: [{ $ifNull: ["$likesCount", 0] }, 3] },
                 { $multiply: ["$views", 1] },
               ],
             },
@@ -927,10 +969,12 @@ export const getRecommendedPosts = async (req: AuthRequest, res: Response) => {
             images: 1,
             tags: 1,
             views: 1,
-            likedBy: 1,
+            likesCount: 1,
             createdAt: 1,
             "user._id": 1,
             "user.username": 1,
+            "user.name": 1,
+            "user.companyName": 1,
             "user.userType": 1,
             "user.profilePic": 1,
           },
@@ -939,7 +983,7 @@ export const getRecommendedPosts = async (req: AuthRequest, res: Response) => {
 
       const formatted = posts.map((post) => ({
         ...post,
-        likes: post.likedBy?.length || 0,
+        likes: post.likesCount || 0,
       }));
 
       return res.json(formatted);
@@ -970,7 +1014,7 @@ export const getRecommendedPosts = async (req: AuthRequest, res: Response) => {
               if: { $gt: ["$views", 0] },
               then: {
                 $divide: [
-                  { $size: { $ifNull: ["$likedBy", []] } },
+                  { $ifNull: ["$likesCount", 0] },
                   "$views",
                 ],
               },
@@ -1041,19 +1085,21 @@ export const getRecommendedPosts = async (req: AuthRequest, res: Response) => {
     applyVisibilityFilter(finalMatch);
 
     const finalPosts = await ImagePost.find(finalMatch)
-      .populate("user", "username userType profilePic")
+      .populate("user", "username name companyName userType profilePic")
       .lean();
 
     // Maintain the score order
-    const orderedPosts = paginated.map((p) => {
-      const fullPost = finalPosts.find((fp: any) => fp._id.toString() === p._id.toString());
-      return fullPost;
-    }).filter(Boolean);
+    const finalPostMap = new Map(
+      finalPosts.map((post: any) => [post._id.toString(), post])
+    );
+    const orderedPosts = paginated
+      .map((p) => finalPostMap.get(p._id.toString()))
+      .filter(Boolean);
 
     const formattedPosts = orderedPosts.map((post: any) => ({
       ...post,
       type: 'post',
-      likes: post.likedBy?.length || 0,
+      likes: post.likesCount || 0,
     }));
 
     // Add in-feed ad on every page for explore
@@ -1105,7 +1151,7 @@ export const getExplore = async (req: Request, res: Response) => {
             engagement: {
               $add: [
                 { $ifNull: ["$views", 0] },
-                { $multiply: [{ $size: { $ifNull: ["$likedBy", []] } }, 2] },
+                { $multiply: [{ $ifNull: ["$likesCount", 0] }, 2] },
               ],
             },
           },
@@ -1130,11 +1176,13 @@ export const getExplore = async (req: Request, res: Response) => {
             images: 1,
             tags: 1,
             views: 1,
-            likedBy: 1,
+            likesCount: 1,
             isBoosted: 1,
             createdAt: 1,
             "user._id": 1,
             "user.username": 1,
+            "user.name": 1,
+            "user.companyName": 1,
             "user.userType": 1,
             "user.profilePic": 1,
           },
@@ -1160,7 +1208,7 @@ export const getExplore = async (req: Request, res: Response) => {
       ...post,
       type: 'post',
       source: tag ? 'tag' : 'explore',
-      likes: post.likedBy?.length || 0,
+      likes: post.likesCount || 0,
     }));
 
       // NOTE: When filtering by tag, do not inject "you might like" fallbacks.
@@ -1196,11 +1244,13 @@ export const getExplore = async (req: Request, res: Response) => {
             images: 1,
             tags: 1,
             views: 1,
-            likedBy: 1,
+            likesCount: 1,
             isBoosted: 1,
             createdAt: 1,
             "user._id": 1,
             "user.username": 1,
+            "user.name": 1,
+            "user.companyName": 1,
             "user.userType": 1,
             "user.profilePic": 1,
           },
@@ -1232,11 +1282,13 @@ export const getExplore = async (req: Request, res: Response) => {
               images: 1,
               tags: 1,
               views: 1,
-              likedBy: 1,
+              likesCount: 1,
               isBoosted: 1,
               createdAt: 1,
               "user._id": 1,
               "user.username": 1,
+              "user.name": 1,
+              "user.companyName": 1,
               "user.userType": 1,
               "user.profilePic": 1,
             },
@@ -1250,7 +1302,7 @@ export const getExplore = async (req: Request, res: Response) => {
         ...post,
         type: 'post',
         source: tag ? 'tag-fallback' : 'random',
-        likes: post.likedBy?.length || 0,
+        likes: post.likesCount || 0,
       }));
 
       formattedPosts = [...formattedPosts, ...formattedRandom];
@@ -1307,8 +1359,11 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
     
     if (req.user) {
       const User = (await import("../models/User.js")).default;
-      const user = await User.findById(req.user._id).select("interests following").lean();
-      
+      const [user, followDocs] = await Promise.all([
+        User.findById(req.user._id).select("interests").lean(),
+        Follow.find({ follower: req.user._id }).select("following").lean(),
+      ]);
+
       if (user?.interests && user.interests.length > 0) {
         // Get top 10 interests sorted by score
         userInterestTags = user.interests
@@ -1316,10 +1371,9 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
           .slice(0, 10)
           .map((i: any) => i.tag);
       }
-      
-      // Get following list for "Following" stream
-      if (user?.following && user.following.length > 0) {
-        followingIds = user.following;
+
+      if (followDocs && followDocs.length > 0) {
+        followingIds = followDocs.map((f: any) => f.following);
       }
     }
 
@@ -1333,7 +1387,7 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
         { $limit: 3 },
         { $lookup: { from: "users", localField: "user", foreignField: "_id", as: "user" } },
         { $unwind: "$user" },
-        { $project: { _id: 1, title: 1, description: 1, images: 1, tags: 1, views: 1, likedBy: 1, createdAt: 1, "user._id": 1, "user.username": 1, "user.userType": 1, "user.profilePic": 1 } }
+        { $project: { _id: 1, title: 1, description: 1, images: 1, tags: 1, views: 1, likesCount: 1, createdAt: 1, "user._id": 1, "user.username": 1, "user.name": 1, "user.companyName": 1, "user.userType": 1, "user.profilePic": 1 } }
       ]) : Promise.resolve([]),
 
       // 2. PERSONALIZED: Posts matching user interests (3 per page if user has interests) - exclude boosted
@@ -1346,7 +1400,7 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
             },
             engagementScore: {
               $add: [
-                { $multiply: [{ $size: { $ifNull: ["$likedBy", []] } }, 2] },
+                { $multiply: [{ $ifNull: ["$likesCount", 0] }, 2] },
                 { $ifNull: ["$views", 0] }
               ]
             }
@@ -1358,7 +1412,7 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
         { $limit: 3 },
         { $lookup: { from: "users", localField: "user", foreignField: "_id", as: "user" } },
         { $unwind: "$user" },
-        { $project: { _id: 1, title: 1, description: 1, images: 1, tags: 1, views: 1, likedBy: 1, createdAt: 1, "user._id": 1, "user.username": 1, "user.userType": 1, "user.profilePic": 1 } }
+        { $project: { _id: 1, title: 1, description: 1, images: 1, tags: 1, views: 1, likesCount: 1, createdAt: 1, "user._id": 1, "user.username": 1, "user.name": 1, "user.companyName": 1, "user.userType": 1, "user.profilePic": 1 } }
       ]) : Promise.resolve([]),
 
       // 3. TRENDING: High engagement posts (3 per page) - exclude boosted
@@ -1368,9 +1422,9 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
           $addFields: {
             engagementScore: {
               $add: [
-                { $multiply: [{ $size: { $ifNull: ["$likedBy", []] } }, 3] },
+                { $multiply: [{ $ifNull: ["$likesCount", 0] }, 3] },
                 { $ifNull: ["$views", 0] },
-                { $multiply: [{ $size: { $ifNull: ["$comments", []] } }, 2] }
+                { $multiply: [{ $ifNull: ["$commentsCount", 0] }, 2] }
               ]
             }
           }
@@ -1380,12 +1434,12 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
         { $limit: 3 },
         { $lookup: { from: "users", localField: "user", foreignField: "_id", as: "user" } },
         { $unwind: "$user" },
-        { $project: { _id: 1, title: 1, description: 1, images: 1, tags: 1, views: 1, likedBy: 1, createdAt: 1, "user._id": 1, "user.username": 1, "user.userType": 1, "user.profilePic": 1 } }
+        { $project: { _id: 1, title: 1, description: 1, images: 1, tags: 1, views: 1, likesCount: 1, createdAt: 1, "user._id": 1, "user.username": 1, "user.name": 1, "user.companyName": 1, "user.userType": 1, "user.profilePic": 1 } }
       ]),
 
       // 4. FRESH: New posts from last 48 hours (2 per page) - exclude boosted
       ImagePost.find(withVisibility({ createdAt: { $gte: twoDaysAgo }, isBoosted: { $ne: true } }))
-        .populate("user", "username userType profilePic")
+        .populate("user", "username name companyName userType profilePic")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(2)
@@ -1393,7 +1447,7 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
 
       // 5. BOOSTED: Seller promoted posts - 1 per page (industry standard like Instagram)
       ImagePost.find(withVisibility({ isBoosted: true, boostExpiresAt: { $gt: now } }))
-        .populate("user", "username userType profilePic")
+        .populate("user", "username name companyName userType profilePic")
         .sort({ boostedAt: -1 })
         .skip(page - 1) // Rotate through boosted posts across pages
         .limit(1)
@@ -1406,7 +1460,7 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
         { $sample: { size: 8 } }, // More random posts for variety
         { $lookup: { from: "users", localField: "user", foreignField: "_id", as: "user" } },
         { $unwind: "$user" },
-        { $project: { _id: 1, title: 1, description: 1, images: 1, tags: 1, views: 1, likedBy: 1, createdAt: 1, "user._id": 1, "user.username": 1, "user.userType": 1, "user.profilePic": 1 } }
+        { $project: { _id: 1, title: 1, description: 1, images: 1, tags: 1, views: 1, likesCount: 1, createdAt: 1, "user._id": 1, "user.username": 1, "user.name": 1, "user.companyName": 1, "user.userType": 1, "user.profilePic": 1 } }
       ]),
 
       // 7. IN-FEED AD: 1 per page (standard frequency like Instagram/Facebook)
@@ -1497,7 +1551,7 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
         { $sample: { size: limit - allPosts.length + 3 } },
         { $lookup: { from: "users", localField: "user", foreignField: "_id", as: "user" } },
         { $unwind: "$user" },
-        { $project: { _id: 1, title: 1, description: 1, images: 1, tags: 1, views: 1, likedBy: 1, createdAt: 1, "user._id": 1, "user.username": 1, "user.userType": 1, "user.profilePic": 1 } }
+        { $project: { _id: 1, title: 1, description: 1, images: 1, tags: 1, views: 1, likesCount: 1, createdAt: 1, "user._id": 1, "user.username": 1, "user.name": 1, "user.companyName": 1, "user.userType": 1, "user.profilePic": 1 } }
       ]);
       addUnique(additionalRandom, 'fallback');
     }
@@ -1527,7 +1581,7 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
     const feed: any[] = feedPosts.map(post => ({
       ...post,
       type: 'post',
-      likes: post.likedBy?.length || 0
+      likes: post.likesCount || 0
     }));
 
     // INSERT BOOSTED POSTS NATURALLY (like Instagram sponsored posts)
@@ -1546,7 +1600,7 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
           type: 'post',
           isBoosted: true,
           _source: 'boosted',
-          likes: boosted.likedBy?.length || 0
+          likes: boosted.likesCount || 0
         });
         
         seenIds.add(boosted._id.toString());
@@ -1731,7 +1785,7 @@ export const getAllBoostedPosts = async (req: Request, res: Response) => {
     }
 
     const boostedPosts = await ImagePost.find(query)
-      .populate("user", "username email companyName userType profilePic")
+      .populate("user", "username name email companyName userType profilePic")
       .select("title images views boostViews isBoosted boostedAt boostExpiresAt createdAt")
       .sort({ boostedAt: -1 })
       .lean();
@@ -1782,13 +1836,13 @@ export const getSimilarPosts = async (req: Request, res: Response) => {
       const fallbackPosts = await ImagePost.find(fallbackMatch)
         .sort({ createdAt: -1 })
         .limit(limit)
-        .populate('user', 'username profilePic userType')
-        .select('images title tags views likedBy createdAt')
+        .populate('user', 'username name companyName profilePic userType')
+        .select('images title tags views likesCount createdAt')
         .lean();
       
       return res.json(fallbackPosts.map(p => ({
         ...p,
-        likes: p.likedBy?.length || 0,
+        likes: (p as any).likesCount || 0,
       })));
     }
 
@@ -1810,7 +1864,7 @@ export const getSimilarPosts = async (req: Request, res: Response) => {
           // Engagement score
           engagementScore: {
             $add: [
-              { $multiply: [{ $size: { $ifNull: ["$likedBy", []] } }, 2] },
+              { $multiply: [{ $ifNull: ["$likesCount", 0] }, 2] },
               { $ifNull: ["$views", 0] },
             ],
           },
@@ -1845,11 +1899,13 @@ export const getSimilarPosts = async (req: Request, res: Response) => {
           images: 1,
           tags: 1,
           views: 1,
-          likedBy: 1,
+          likesCount: 1,
           createdAt: 1,
           tagMatchCount: 1,
           "user._id": 1,
           "user.username": 1,
+          "user.name": 1,
+          "user.companyName": 1,
           "user.profilePic": 1,
           "user.userType": 1,
         },
@@ -1858,7 +1914,7 @@ export const getSimilarPosts = async (req: Request, res: Response) => {
 
     const formatted = similarPosts.map((post) => ({
       ...post,
-      likes: post.likedBy?.length || 0,
+      likes: post.likesCount || 0,
     }));
 
     res.json(formatted);
@@ -2045,7 +2101,7 @@ export const updatePost = async (req: AuthRequest, res: Response) => {
 
     return res.json({
       ...populatedPost!.toObject(),
-      likes: populatedPost?.likedBy?.length || 0,
+      likes: (populatedPost as any)?.likesCount || 0,
       message: "Post updated successfully",
     });
   } catch (err) {
@@ -2077,6 +2133,9 @@ export const deletePost = async (req: AuthRequest, res: Response) => {
       mongoose.model("Comment").deleteMany({ post: postId }),
       // Delete reports for this post
       Report.deleteMany({ post: postId }),
+      // Delete likes/views for this post
+      PostLike.deleteMany({ post: postId }),
+      PostView.deleteMany({ post: postId }),
       // Remove from users' collections
       mongoose.model("User").updateMany(
         { "collections.posts": postId },
@@ -2137,12 +2196,12 @@ export const getMyArchivedPosts = async (req: AuthRequest, res: Response) => {
     if (!req.user) return res.status(401).json({ message: "Unauthorized" });
 
     const posts = await ImagePost.find({ user: req.user._id, isArchived: true })
-      .populate("user", "username userType requireChatBeforePurchase")
+      .populate("user", "username name companyName userType requireChatBeforePurchase")
       .sort({ archivedAt: -1 });
 
     const formatted = posts.map(post => ({
       ...post.toObject(),
-      likes: post.likedBy?.length || 0,
+      likes: (post as any).likesCount || 0,
     }));
 
     res.json(formatted);

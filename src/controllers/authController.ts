@@ -556,6 +556,15 @@ export const login = async (
     if (!isMatch)
       return res.status(400).json({ message: "Invalid credentials" });
 
+    // Block unverified business accounts
+    if (user.userType === "business" && !user.isVerified) {
+      return res.status(403).json({
+        message: "Business account pending admin approval",
+        isVerified: false,
+        userType: user.userType,
+      });
+    }
+
     const token = jwt.sign(
       {
         _id: user._id,
@@ -723,6 +732,15 @@ export const googleAuth = async (
       }
       if ((user as any).isDeleted) {
         return res.status(403).json({ message: "Account deleted" });
+      }
+
+      // Block unverified business accounts from Google sign-in
+      if (user.userType === "business" && !user.isVerified) {
+        return res.status(403).json({
+          message: "Business account pending admin approval",
+          isVerified: false,
+          userType: user.userType,
+        });
       }
     } else {
       // Create new user with Google data

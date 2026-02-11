@@ -18,6 +18,10 @@ export interface IUser extends Document {
   phone: string;
   isVerified: boolean;
   googleId?: string; // ✅ For Google Sign In
+  usernameLower?: string;
+  nameLower?: string;
+  companyNameLower?: string;
+  emailLower?: string;
 
   // --- Common Optional Fields ---
   bio?: string;
@@ -66,8 +70,8 @@ export interface IUser extends Document {
   };
   
   // --- Social Features ---
-  followers: mongoose.Types.ObjectId[];
-  following: mongoose.Types.ObjectId[];
+  followersCount: number;
+  followingCount: number;
   
   // --- Push Notifications ---
   pushTokens: {
@@ -111,6 +115,10 @@ const userSchema = new Schema<IUser>(
     username: { type: String, required: true, unique: true, lowercase: true, trim: true },
     name: { type: String, required: true, trim: true },
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+    usernameLower: { type: String, trim: true, lowercase: true, index: true },
+    nameLower: { type: String, trim: true, lowercase: true, index: true },
+    companyNameLower: { type: String, trim: true, lowercase: true, index: true },
+    emailLower: { type: String, trim: true, lowercase: true, index: true },
     password: { type: String, required: true },
     phone: { type: String, required: true },
     googleId: { type: String, sparse: true, index: true }, // ✅ For Google Sign In
@@ -182,9 +190,9 @@ const userSchema = new Schema<IUser>(
       note: { type: String, trim: true, default: "" },
     },
     
-    // --- Social Features ---
-    followers: [{ type: Schema.Types.ObjectId, ref: "User" }],
-    following: [{ type: Schema.Types.ObjectId, ref: "User" }],
+    // --- Social Features (denormalized counts) ---
+    followersCount: { type: Number, default: 0 },
+    followingCount: { type: Number, default: 0 },
     
     // --- Push Notifications ---
     pushTokens: [{
@@ -213,6 +221,10 @@ const userSchema = new Schema<IUser>(
 userSchema.index({ username: 1 });
 userSchema.index({ name: 1 });
 userSchema.index({ companyName: 1 });
+userSchema.index({ usernameLower: 1 });
+userSchema.index({ nameLower: 1 });
+userSchema.index({ companyNameLower: 1 });
+userSchema.index({ emailLower: 1 });
 userSchema.index(
   { username: "text", name: "text", companyName: "text", bio: "text" },
   {
@@ -223,6 +235,11 @@ userSchema.index(
 
 // ✅ Updated Business Validation Hook
 userSchema.pre("save", function (next) {
+  this.usernameLower = this.username ? this.username.toLowerCase() : this.usernameLower;
+  this.nameLower = this.name ? this.name.toLowerCase() : this.nameLower;
+  this.companyNameLower = this.companyName ? this.companyName.toLowerCase() : this.companyNameLower;
+  this.emailLower = this.email ? this.email.toLowerCase() : this.emailLower;
+
   if (this.userType === "business") {
     // Ensure they provided an ID Proof (one of: GST, PAN, Aadhaar)
     if (!this.idProofType || !this.idProofNumber || !this.idProofUrl) {

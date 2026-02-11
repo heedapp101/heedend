@@ -21,11 +21,12 @@ export const getNotifications = async (req: AuthRequest, res: Response) => {
 
     const [notifications, total, unreadCount] = await Promise.all([
       Notification.find(query)
-        .populate("sender", "name username profilePic")
+        .populate("sender", "name username companyName userType profilePic")
         .populate("post", "title images")
         .sort({ createdAt: -1 })
         .skip(skip)
-        .limit(Number(limit)),
+        .limit(Number(limit))
+        .lean(),
       Notification.countDocuments(query),
       getUnreadCount(req.user._id.toString()),
     ]);

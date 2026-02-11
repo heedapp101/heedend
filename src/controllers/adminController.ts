@@ -160,32 +160,41 @@ export const getDeletedUsers = async (req: Request, res: Response) => {
 export const getDashboardStats = async (req: Request, res: Response) => {
   try {
     // 1. Quick Stats
-    const totalUsers = await User.countDocuments();
-    const deletedUsers = await User.countDocuments({ isDeleted: true });
-    const businessUsers = await User.countDocuments({ userType: "business" });
-    const pendingApprovals = await User.countDocuments({ userType: "business", isVerified: false });
-    const totalPosts = await ImagePost.countDocuments();
-
-    // 2. Graph Data: User Growth (Last 7 Days)
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
-    const userGrowth = await User.aggregate([
-      { $match: { createdAt: { $gte: sevenDaysAgo } } },
-      {
-        $group: {
-          _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
-          users: { $sum: 1 },
+    const [
+      totalUsers,
+      deletedUsers,
+      businessUsers,
+      pendingApprovals,
+      totalPosts,
+      userGrowth,
+      recentUsers,
+    ] = await Promise.all([
+      User.countDocuments(),
+      User.countDocuments({ isDeleted: true }),
+      User.countDocuments({ userType: "business" }),
+      User.countDocuments({ userType: "business", isVerified: false }),
+      ImagePost.countDocuments(),
+      // 2. Graph Data: User Growth (Last 7 Days)
+      User.aggregate([
+        { $match: { createdAt: { $gte: sevenDaysAgo } } },
+        {
+          $group: {
+            _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+            users: { $sum: 1 },
+          },
         },
-      },
-      { $sort: { _id: 1 } },
+        { $sort: { _id: 1 } },
+      ]),
+      // 3. Recent Activity (Newest 5 Users)
+      User.find()
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .select("username email userType createdAt")
+        .lean(),
     ]);
-
-    // 3. Recent Activity (Newest 5 Users)
-    const recentUsers = await User.find()
-      .sort({ createdAt: -1 })
-      .limit(5)
-      .select("username email userType createdAt");
 
     res.status(200).json({
       stats: {
@@ -481,11 +490,11 @@ export const getAwardCandidates = async (req: Request, res: Response) => {
       { $match: match },
       {
         $addFields: {
-          likesCount: { $size: { $ifNull: ["$likedBy", []] } },
+          likesCount: { $ifNull: ["$likesCount", 0] },
           engagementScore: {
             $add: [
               { $ifNull: ["$views", 0] },
-              { $multiply: [{ $size: { $ifNull: ["$likedBy", []] } }, 3] },
+              { $multiply: [{ $ifNull: ["$likesCount", 0] }, 3] },
             ],
           },
         },
@@ -508,7 +517,7 @@ export const getAwardCandidates = async (req: Request, res: Response) => {
           images: 1,
           tags: 1,
           views: 1,
-          likedBy: 1,
+          likesCount: 1,
           createdAt: 1,
           engagementScore: 1,
           "user._id": 1,
