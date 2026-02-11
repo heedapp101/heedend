@@ -13,7 +13,7 @@ export interface AuthRequest extends Request {
   };
 }
 
-export const requireAuth = (
+export const requireAuth = async (
   req: Request,
   res: Response,
   next: NextFunction
