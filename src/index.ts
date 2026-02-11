@@ -10,6 +10,7 @@ import { createServer } from "http";
 import { connectDB } from "./config/db.js";
 import { initializeSocket } from "./socket/socketHandler.js";
 import { initializeTagWorker } from "./workers/tagWorker.js"; // ✅ Tag Worker
+import { getRedisCommandClient } from "./config/redis.js";
 
 // Routes Imports
 import authRoutes from "./routes/authRoutes.js";
@@ -176,6 +177,27 @@ app.use("/api/legal", legalRoutes); // ✅ LEGAL ROUTES
 // Health check endpoint
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "ok", timestamp: new Date().toISOString() });
+});
+
+// Redis health check endpoint
+app.get("/health/redis", async (req, res) => {
+  try {
+    const client = await getRedisCommandClient();
+    const pong = await client.ping();
+    res.status(200).json({
+      status: "ok",
+      redis: "connected",
+      ping: pong,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error: any) {
+    res.status(503).json({
+      status: "error",
+      redis: "disconnected",
+      message: error?.message || "Redis connection failed",
+      timestamp: new Date().toISOString(),
+    });
+  }
 });
 
 // Error handling (must be after routes)
