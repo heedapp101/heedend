@@ -139,7 +139,13 @@ const sensitiveLimiter = rateLimit({
 // ✅ SECURITY: CORS - Restrict to allowed origins in production
 const allowedOrigins = process.env.ALLOWED_ORIGINS 
   ? process.env.ALLOWED_ORIGINS.split(",") 
-  : ["http://localhost:3000", "http://localhost:5173", "http://localhost:8081"];
+  : [
+      "http://localhost:3000",
+      "http://localhost:5173",
+      "http://localhost:8081",
+      "https://www.heeszo.com",
+      "https://heeszo.com",
+    ];
 
 app.use(cors({
   origin: process.env.NODE_ENV === "production" 
