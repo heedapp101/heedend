@@ -269,15 +269,22 @@ export async function initializeSocket(server: HttpServer) {
             .map((p) => p.toString())
             .filter((id) => id !== socket.userId);
 
+          console.log("[AUTO-REPLY DEBUG] sender:", socket.userId, "userType:", socket.userType);
+          console.log("[AUTO-REPLY DEBUG] recipientIds:", recipientIds);
+          console.log("[AUTO-REPLY DEBUG] messageType:", messageType, "startInquiry:", startInquiry);
+
           const businessRecipient = await User.findOne({
             _id: { $in: recipientIds },
             userType: "business",
-            autoReplyEnabled: true,
-          }).select("autoReplyEnabled autoReplyMessage");
+          }).select("autoReplyEnabled autoReplyMessage userType");
+
+          console.log("[AUTO-REPLY DEBUG] businessRecipient found:", businessRecipient ? { id: businessRecipient._id, autoReplyEnabled: businessRecipient.autoReplyEnabled, userType: (businessRecipient as any).userType } : null);
+          console.log("[AUTO-REPLY DEBUG] sender is business?", socket.userType === "business");
 
           if (businessRecipient && socket.userType !== "business") {
             const isInquiryMessage = messageType === "inquiry" || startInquiry;
             const autoReplyInquiryId = finalInquiryId || chat.activeInquiryId;
+            console.log("[AUTO-REPLY DEBUG] isInquiryMessage:", isInquiryMessage, "autoReplyInquiryId:", autoReplyInquiryId);
 
             const resolveInquiryProduct = () => {
               if (product?.postId && Types.ObjectId.isValid(String(product.postId))) {
@@ -307,6 +314,7 @@ export async function initializeSocket(server: HttpServer) {
             };
 
             const inquiryProduct = isInquiryMessage ? resolveInquiryProduct() : null;
+            console.log("[AUTO-REPLY DEBUG] inquiryProduct:", inquiryProduct);
 
             if (isInquiryMessage && inquiryProduct && autoReplyInquiryId) {
               const existingAutoProductReply = await Message.findOne({
@@ -318,7 +326,10 @@ export async function initializeSocket(server: HttpServer) {
                 .sort({ createdAt: -1 })
                 .lean();
 
+              console.log("[AUTO-REPLY DEBUG] existingAutoProductReply:", !!existingAutoProductReply);
+
               if (!existingAutoProductReply) {
+                console.log("[AUTO-REPLY DEBUG] ✅ Sending product CTA auto-reply!");
                 const autoReplyCtaText = "Tap Buy Now or Negotiate below.";
                 const autoReplyMessage = {
                   _id: new Types.ObjectId(),
@@ -351,7 +362,8 @@ export async function initializeSocket(server: HttpServer) {
                   activeInquiry: activeInquiry || null,
                 });
               }
-            } else {
+            } else if (businessRecipient.autoReplyEnabled) {
+              console.log("[AUTO-REPLY DEBUG] Not an inquiry message, sending text auto-reply (autoReplyEnabled=true)");
               const autoReplyText =
                 businessRecipient.autoReplyMessage?.trim() ||
                 "Thanks for your message. We will reply soon.";
@@ -396,10 +408,14 @@ export async function initializeSocket(server: HttpServer) {
                   activeInquiry: activeInquiry || null,
                 });
               }
+            } else {
+              console.log("[AUTO-REPLY DEBUG] Skipped text auto-reply (autoReplyEnabled:", businessRecipient.autoReplyEnabled, ", isInquiry:", isInquiryMessage, ")");
             }
+          } else {
+            console.log("[AUTO-REPLY DEBUG] ❌ Skipped: no business recipient or sender is business");
           }
         } catch (autoReplyError) {
-          console.error("Socket auto-reply error:", autoReplyError);
+          console.error("[AUTO-REPLY DEBUG] ❌ Error in auto-reply:", autoReplyError);
         }
       } catch (error) {
         console.error("Error sending message:", error);

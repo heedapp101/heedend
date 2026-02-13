@@ -164,7 +164,7 @@ const userSchema = new Schema<IUser>(
     // Store Settings
     productType: { type: String, trim: true },
     requireChatBeforePurchase: { type: Boolean, default: true },
-    autoReplyEnabled: { type: Boolean, default: false },
+    autoReplyEnabled: { type: Boolean, default: true },
     autoReplyMessage: {
       type: String,
       trim: true,
