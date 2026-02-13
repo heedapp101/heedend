@@ -93,6 +93,33 @@ export const createImagePost = async (req: AuthRequest, res: Response) => {
       }
     }
 
+    // --- Size Variants ---
+    let sizeVariants: { size: string; price: number; quantity: number }[] = [];
+    if (req.user.userType === "business" && req.body.sizeVariants) {
+      try {
+        const parsed = typeof req.body.sizeVariants === "string"
+          ? JSON.parse(req.body.sizeVariants)
+          : req.body.sizeVariants;
+        if (Array.isArray(parsed)) {
+          sizeVariants = parsed
+            .filter((v: any) => v.size && typeof v.size === "string")
+            .map((v: any) => ({
+              size: v.size.trim(),
+              price: Math.max(0, Number(v.price) || 0),
+              quantity: Math.max(0, Math.floor(Number(v.quantity) || 0)),
+            }));
+          // If size variants exist, compute overall stock from them
+          if (sizeVariants.length > 0) {
+            const totalQty = sizeVariants.reduce((sum, v) => sum + v.quantity, 0);
+            quantityAvailable = totalQty;
+            isOutOfStock = totalQty === 0;
+          }
+        }
+      } catch {
+        // Invalid JSON, ignore sizeVariants
+      }
+    }
+
     // --- Files ---
     const files = Array.isArray(req.files)
       ? req.files
@@ -186,6 +213,7 @@ export const createImagePost = async (req: AuthRequest, res: Response) => {
       price: parsedPrice,
       quantityAvailable,
       isOutOfStock,
+      sizeVariants,
       images,
       tags: finalTags,
       tagGenerationStatus: "pending", // Tags will be generated asynchronously

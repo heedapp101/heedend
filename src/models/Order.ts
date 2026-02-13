@@ -25,6 +25,7 @@ export interface IOrderItem {
   price: number;
   quantity: number;
   image: string;
+  selectedSize?: string;
 }
 
 export interface IShippingAddress {
@@ -59,6 +60,7 @@ export interface IOrder extends Document {
   // Shipping
   shippingAddress: IShippingAddress;
   trackingNumber?: string;
+  trackingLink?: string;
   shippingCarrier?: string;
   estimatedDelivery?: Date;
   deliveredAt?: Date;
@@ -94,6 +96,7 @@ const orderItemSchema = new Schema<IOrderItem>(
     price: { type: Number, required: true, min: 0 },
     quantity: { type: Number, required: true, min: 1, default: 1 },
     image: { type: String, required: true },
+    selectedSize: { type: String },
   },
   { _id: false }
 );
@@ -156,6 +159,7 @@ const orderSchema = new Schema<IOrder>(
     // Shipping
     shippingAddress: { type: shippingAddressSchema, required: true },
     trackingNumber: { type: String },
+    trackingLink: { type: String },
     shippingCarrier: { type: String },
     estimatedDelivery: { type: Date },
     deliveredAt: { type: Date },

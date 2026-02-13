@@ -11,6 +11,15 @@ const imageSchema = new Schema(
   { _id: false }
 );
 
+const sizeVariantSchema = new Schema(
+  {
+    size: { type: String, required: true, trim: true },
+    price: { type: Number, required: true, min: 0 },
+    quantity: { type: Number, required: true, min: 0, default: 0 },
+  },
+  { _id: false }
+);
+
 const imagePostSchema = new Schema(
   {
     user: { type: Schema.Types.ObjectId, ref: "User", required: true },
@@ -19,6 +28,7 @@ const imagePostSchema = new Schema(
     price: { type: Number, min: 0 },
     quantityAvailable: { type: Number, min: 0, default: null },
     isOutOfStock: { type: Boolean, default: false },
+    sizeVariants: { type: [sizeVariantSchema], default: [] },
     
     allowComments: { type: Boolean, default: true },
     allowLikes: { type: Boolean, default: true },

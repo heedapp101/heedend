@@ -201,7 +201,7 @@ const sendOrderUpdateMessage = async (
           content = `🔧 Your order #${orderNumber} is now being processed and prepared for shipping.`;
           break;
         case "shipped":
-          content = `🚚 Your order #${orderNumber} has been shipped!${options?.trackingNumber ? ` Tracking: ${options.trackingNumber}` : ""}`;
+          content = `🚚 Your order #${orderNumber} has been shipped!${options?.trackingNumber ? ` Tracking: ${options.trackingNumber}` : ""}${options?.trackingLink ? `\n📎 Track here: ${options.trackingLink}` : ""}`;
           break;
         case "out_for_delivery":
           content = `📍 Your order #${orderNumber} is out for delivery! It should arrive today.`;
@@ -229,6 +229,7 @@ const sendOrderUpdateMessage = async (
         status: newStatus,
         previousStatus,
         trackingNumber: options?.trackingNumber,
+        trackingLink: options?.trackingLink,
         estimatedDelivery: options?.estimatedDelivery,
       } : undefined,
       deliveryConfirmation: messageType === "delivery-confirmation" ? {
@@ -271,6 +272,7 @@ export const createOrder = async (req: AuthRequest, res: Response) => {
       shippingAddress,
       buyerNotes,
       chatId,
+      selectedSize,
     } = req.body;
     if (!buyerId) {
       return res.status(401).json({ message: "Unauthorized" });
@@ -305,6 +307,8 @@ export const createOrder = async (req: AuthRequest, res: Response) => {
     }
 
     const seller = post.user as any;
+    const sizeVariants = (post as any).sizeVariants || [];
+    const hasSizeVariants = Array.isArray(sizeVariants) && sizeVariants.length > 0;
     const hasManagedInventory = typeof (post as any).quantityAvailable === "number";
     const currentQuantity = hasManagedInventory ? Number((post as any).quantityAvailable) : null;
 
@@ -313,15 +317,39 @@ export const createOrder = async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ message: "Cannot buy your own product" });
     }
 
-    if ((post as any).isOutOfStock === true || (hasManagedInventory && currentQuantity !== null && currentQuantity <= 0)) {
-      return res.status(400).json({ message: "This product is out of stock" });
-    }
+    // Size variant validation
+    let matchedVariant: any = null;
+    let unitPrice = post.price || 0;
 
-    if (hasManagedInventory && currentQuantity !== null && parsedQuantity > currentQuantity) {
-      return res.status(400).json({
-        message: `Only ${currentQuantity} item(s) available in stock`,
-        availableQuantity: currentQuantity,
-      });
+    if (hasSizeVariants) {
+      if (!selectedSize) {
+        return res.status(400).json({ message: "Please select a size" });
+      }
+      matchedVariant = sizeVariants.find((v: any) => v.size === selectedSize);
+      if (!matchedVariant) {
+        return res.status(400).json({ message: `Size "${selectedSize}" is not available` });
+      }
+      if (matchedVariant.quantity <= 0) {
+        return res.status(400).json({ message: `Size "${selectedSize}" is out of stock` });
+      }
+      if (parsedQuantity > matchedVariant.quantity) {
+        return res.status(400).json({
+          message: `Only ${matchedVariant.quantity} item(s) available in size "${selectedSize}"`,
+          availableQuantity: matchedVariant.quantity,
+        });
+      }
+      unitPrice = matchedVariant.price;
+    } else {
+      if ((post as any).isOutOfStock === true || (hasManagedInventory && currentQuantity !== null && currentQuantity <= 0)) {
+        return res.status(400).json({ message: "This product is out of stock" });
+      }
+
+      if (hasManagedInventory && currentQuantity !== null && parsedQuantity > currentQuantity) {
+        return res.status(400).json({
+          message: `Only ${currentQuantity} item(s) available in stock`,
+          availableQuantity: currentQuantity,
+        });
+      }
     }
 
     // Check if COD is available for this seller
@@ -330,19 +358,22 @@ export const createOrder = async (req: AuthRequest, res: Response) => {
     }
 
     // Calculate pricing
-    const subtotal = (post.price || 0) * parsedQuantity;
+    const subtotal = unitPrice * parsedQuantity;
     const shippingCharge = subtotal >= 500 ? 0 : 50; // Free shipping above ₹500
     const discount = 0; // Can add coupon system later
     const totalAmount = subtotal + shippingCharge - discount;
 
     // Create order item
-    const orderItem = {
+    const orderItem: any = {
       post: post._id,
-      title: post.title,
-      price: post.price || 0,
+      title: post.title + (selectedSize ? ` (${selectedSize})` : ''),
+      price: unitPrice,
       quantity: parsedQuantity,
       image: post.images[0]?.low || post.images[0]?.high || "",
     };
+    if (selectedSize) {
+      orderItem.selectedSize = selectedSize;
+    }
 
     // Generate order number
     const orderNumber = await generateOrderNumber();
@@ -368,7 +399,46 @@ export const createOrder = async (req: AuthRequest, res: Response) => {
     await order.save();
 
     // Reduce inventory when quantity tracking is enabled for the post
-    if (hasManagedInventory && currentQuantity !== null) {
+    if (hasSizeVariants && matchedVariant) {
+      // Reduce size variant quantity
+      matchedVariant.quantity = Math.max(0, matchedVariant.quantity - parsedQuantity);
+      // Recompute overall stock  
+      const totalQty = sizeVariants.reduce((sum: number, v: any) => sum + v.quantity, 0);
+      (post as any).quantityAvailable = totalQty;
+      (post as any).isOutOfStock = totalQty === 0;
+      (post as any).sizeVariants = sizeVariants;
+      await post.save();
+
+      const threshold = Number(seller.inventoryAlertThreshold || 3);
+      if (totalQty === 0) {
+        await createNotification({
+          recipientId: seller._id.toString(),
+          type: "system",
+          title: "Inventory Empty",
+          message: `"${post.title}" is now out of stock (all sizes).`,
+          postId: post._id.toString(),
+          metadata: { postId: post._id.toString(), quantityAvailable: 0 },
+        });
+      } else if (matchedVariant.quantity === 0) {
+        await createNotification({
+          recipientId: seller._id.toString(),
+          type: "system",
+          title: "Size Out of Stock",
+          message: `"${post.title}" size "${selectedSize}" is now out of stock.`,
+          postId: post._id.toString(),
+          metadata: { postId: post._id.toString(), size: selectedSize, quantityAvailable: 0 },
+        });
+      } else if (matchedVariant.quantity <= threshold) {
+        await createNotification({
+          recipientId: seller._id.toString(),
+          type: "system",
+          title: "Low Inventory Alert",
+          message: `"${post.title}" size "${selectedSize}" is running low (${matchedVariant.quantity} left).`,
+          postId: post._id.toString(),
+          metadata: { postId: post._id.toString(), size: selectedSize, quantityAvailable: matchedVariant.quantity },
+        });
+      }
+    } else if (hasManagedInventory && currentQuantity !== null) {
       const nextQuantity = Math.max(0, currentQuantity - parsedQuantity);
       (post as any).quantityAvailable = nextQuantity;
       (post as any).isOutOfStock = nextQuantity === 0;
@@ -462,8 +532,9 @@ export const getMyOrders = async (req: AuthRequest, res: Response) => {
     const { status, page = 1, limit = 20 } = req.query;
 
     const query: any = { buyer: buyerId };
-    if (status) {
-      query.status = status;
+    if (status && status !== 'all') {
+      const statuses = (status as string).split(',').map(s => s.trim());
+      query.status = statuses.length > 1 ? { $in: statuses } : statuses[0];
     }
 
     const skip = (Number(page) - 1) * Number(limit);
@@ -645,7 +716,8 @@ export const getSellerOrders = async (req: AuthRequest, res: Response) => {
 
     const query: any = { seller: sellerObjectId };
     if (status && status !== 'all') {
-      query.status = status;
+      const statuses = (status as string).split(',').map(s => s.trim());
+      query.status = statuses.length > 1 ? { $in: statuses } : statuses[0];
     }
 
     const skip = (Number(page) - 1) * Number(limit);
@@ -716,7 +788,7 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
   try {
     const sellerId = req.user?._id;
     const { orderId } = req.params;
-    const { status, note, trackingNumber, shippingCarrier, estimatedDelivery } = req.body;
+    const { status, note, trackingNumber, shippingCarrier, estimatedDelivery, trackingLink } = req.body;
 
     const order = await Order.findById(orderId);
     if (!order) {
@@ -760,6 +832,7 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
 
     // Update shipping info if provided
     if (trackingNumber) order.trackingNumber = trackingNumber;
+    if (trackingLink) (order as any).trackingLink = trackingLink;
     if (shippingCarrier) order.shippingCarrier = shippingCarrier;
     if (estimatedDelivery) order.estimatedDelivery = new Date(estimatedDelivery);
     if (status === "delivered") order.deliveredAt = new Date();
@@ -782,6 +855,7 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
       previousStatus,
       {
         trackingNumber: order.trackingNumber,
+        trackingLink: (order as any).trackingLink,
         estimatedDelivery: order.estimatedDelivery,
         isDeliveryConfirmation: status === "delivered" || status === "out_for_delivery",
       }
