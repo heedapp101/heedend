@@ -706,7 +706,7 @@ export const deleteMyAccount = async (req: AuthRequest, res: Response) => {
     }
 
     const userId = user._id;
-    const { reason } = req.body as { reason?: string };
+    const { reason } = (req.body || {}) as { reason?: string };
     const deletedAt = new Date();
 
     // ──────────────────────────────────────────────
@@ -832,39 +832,53 @@ export const deleteMyAccount = async (req: AuthRequest, res: Response) => {
     const anonymizedEmail = `deleted+${userId.toString()}@heed.app`;
     const anonymizedUsername = `deleted_${userId.toString().slice(-8)}`;
 
-    user.email = anonymizedEmail;
-    user.username = anonymizedUsername;
-    user.name = "Deleted User";
-    user.phone = "";
-    user.bio = "";
-    user.profilePic = "";
-    user.bannerImg = "";
-    user.location = "";
-    user.interests = [];
-    user.pushTokens = [];
-    user.companyName = undefined;
-    user.address = undefined;
-    user.gstNumber = undefined;
-    user.idProofType = undefined;
-    user.idProofNumber = undefined;
-    user.idProofUrl = undefined;
-    user.paymentDetails = {
-      upiId: "",
-      accountHolderName: "",
-      accountNumber: "",
-      ifsc: "",
-      bankName: "",
-      phone: "",
-      note: "",
-    };
-    (user as any).isDeleted = true;
-    (user as any).deletedAt = deletedAt;
-    (user as any).deletedReason = reason?.trim() || "user_request";
-    (user as any).deletedBy = "user";
-    (user as any).followersCount = 0;
-    (user as any).followingCount = 0;
-
-    await user.save();
+    await User.updateOne(
+      { _id: userId },
+      {
+        $set: {
+          email: anonymizedEmail,
+          emailLower: anonymizedEmail.toLowerCase(),
+          username: anonymizedUsername,
+          usernameLower: anonymizedUsername.toLowerCase(),
+          name: "Deleted User",
+          nameLower: "deleted user",
+          userType: "general",
+          phone: "",
+          bio: "",
+          profilePic: "",
+          bannerImg: "",
+          location: "",
+          interests: [],
+          pushTokens: [],
+          paymentDetails: {
+            upiId: "",
+            accountHolderName: "",
+            accountNumber: "",
+            ifsc: "",
+            bankName: "",
+            phone: "",
+            note: "",
+          },
+          isDeleted: true,
+          deletedAt,
+          deletedReason: reason?.trim() || "user_request",
+          deletedBy: "user",
+          followersCount: 0,
+          followingCount: 0,
+        },
+        $unset: {
+          companyName: "",
+          companyNameLower: "",
+          country: "",
+          address: "",
+          gstNumber: "",
+          idProofType: "",
+          idProofNumber: "",
+          idProofUrl: "",
+          productType: "",
+        },
+      }
+    );
 
     console.log(`✅ Account deleted: ${userId} (${anonymizedUsername})`);
     res.status(200).json({ success: true, deletedAt });

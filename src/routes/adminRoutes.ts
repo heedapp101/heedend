@@ -14,6 +14,9 @@ import {
   getReportedPosts,
   updateReportStatus,
   deleteReportedPost,
+  getReportedUsers,
+  updateUserReportStatus,
+  banReportedUser,
 } from "../controllers/adminController.js";
 import { requireAuth } from "../middleware/authMiddleware.js";
 import { adminMiddleware } from "../middleware/roleMiddleware.js";
@@ -39,5 +42,10 @@ router.patch("/posts/:postId/visibility", requireAuth, adminMiddleware, updatePo
 router.get("/reports", requireAuth, adminMiddleware, getReportedPosts);
 router.put("/reports/:reportId", requireAuth, adminMiddleware, updateReportStatus);
 router.delete("/reports/post/:postId", requireAuth, adminMiddleware, deleteReportedPost);
+
+// ✅ USER REPORTS: Manage reported users
+router.get("/user-reports", requireAuth, adminMiddleware, getReportedUsers);
+router.put("/user-reports/:reportId", requireAuth, adminMiddleware, updateUserReportStatus);
+router.delete("/user-reports/user/:userId", requireAuth, adminMiddleware, banReportedUser);
 
 export default router;

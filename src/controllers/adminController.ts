@@ -3,6 +3,7 @@ import User from "../models/User.js";
 import ImagePost from "../models/ImagePost.js";
 import RecommendationAnalytics from "../models/RecommendationAnalytics.js";
 import Report from "../models/Report.js";
+import UserReport from "../models/UserReport.js";
 import crypto from "crypto";
 const signPrivateUrl = (url: string) => {
   // Only sign if it's a private URL
@@ -683,7 +684,11 @@ export const getReportedPosts = async (req: Request, res: Response) => {
     const skip = (Number(page) - 1) * Number(limit);
     
     const reports = await Report.find({ status })
-      .populate("post", "title images user createdAt")
+      .populate({
+        path: "post",
+        select: "title images user createdAt",
+        populate: { path: "user", select: "username email profilePic userType" },
+      })
       .populate("reporter", "username email")
       .populate("reviewedBy", "username")
       .sort({ createdAt: -1 })
@@ -793,6 +798,138 @@ export const deleteReportedPost = async (req: Request, res: Response) => {
     res.status(200).json({ success: true, message: "Post deleted and reports resolved" });
   } catch (error: any) {
     console.error("Delete Reported Post Error:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/* =======================
+   GET REPORTED USERS
+======================= */
+export const getReportedUsers = async (req: Request, res: Response) => {
+  try {
+    const { status = "pending", page = 1, limit = 20 } = req.query;
+    const skip = (Number(page) - 1) * Number(limit);
+
+    const reports = await UserReport.find({ status })
+      .populate("reportedUser", "username email profilePic userType isVerified")
+      .populate("reporter", "username email")
+      .populate("reviewedBy", "username")
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(Number(limit))
+      .lean();
+
+    // Group reports by reported user
+    const userReports = new Map<string, any>();
+
+    for (const report of reports) {
+      if (!report.reportedUser) continue;
+      const userId = (report.reportedUser as any)._id.toString();
+
+      if (!userReports.has(userId)) {
+        userReports.set(userId, {
+          reportedUser: report.reportedUser,
+          reports: [],
+          totalReports: 0,
+        });
+      }
+
+      userReports.get(userId).reports.push({
+        _id: report._id,
+        reason: report.reason,
+        customReason: report.customReason,
+        reporter: report.reporter,
+        createdAt: report.createdAt,
+        status: report.status,
+      });
+      userReports.get(userId).totalReports += 1;
+    }
+
+    const total = await UserReport.countDocuments({ status });
+
+    res.status(200).json({
+      reports: Array.from(userReports.values()),
+      total,
+      page: Number(page),
+      pages: Math.ceil(total / Number(limit)),
+    });
+  } catch (error: any) {
+    console.error("Get Reported Users Error:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/* =======================
+   UPDATE USER REPORT STATUS
+======================= */
+export const updateUserReportStatus = async (req: Request, res: Response) => {
+  try {
+    const { reportId } = req.params;
+    const { status, adminNotes } = req.body;
+
+    const validStatuses = ["reviewed", "dismissed", "action_taken"];
+    if (!status || !validStatuses.includes(status)) {
+      return res.status(400).json({ message: "Invalid status" });
+    }
+
+    const report = await UserReport.findByIdAndUpdate(
+      reportId,
+      {
+        status,
+        adminNotes,
+        reviewedBy: (req as any).user._id,
+        reviewedAt: new Date(),
+      },
+      { new: true }
+    );
+
+    if (!report) {
+      return res.status(404).json({ message: "User report not found" });
+    }
+
+    res.status(200).json({ success: true, report });
+  } catch (error: any) {
+    console.error("Update User Report Status Error:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/* =======================
+   BAN REPORTED USER
+======================= */
+export const banReportedUser = async (req: Request, res: Response) => {
+  try {
+    const { userId } = req.params;
+
+    const user = await User.findByIdAndUpdate(
+      userId,
+      {
+        isDeleted: true,
+        deletedAt: new Date(),
+        deletedBy: (req as any).user._id,
+        deletedReason: "Banned by admin due to user reports",
+      },
+      { new: true }
+    );
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Update all reports for this user to "action_taken"
+    await UserReport.updateMany(
+      { reportedUser: userId },
+      {
+        status: "action_taken",
+        adminNotes: "User banned by admin",
+        reviewedBy: (req as any).user._id,
+        reviewedAt: new Date(),
+      }
+    );
+
+    res.status(200).json({ success: true, message: "User banned and reports resolved" });
+  } catch (error: any) {
+    console.error("Ban Reported User Error:", error);
     res.status(500).json({ message: error.message });
   }
 };
