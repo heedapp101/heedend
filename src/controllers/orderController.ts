@@ -175,6 +175,7 @@ const sendOrderUpdateMessage = async (
   previousStatus: OrderStatus,
   options?: {
     trackingNumber?: string;
+    trackingLink?: string;
     estimatedDelivery?: Date;
     isDeliveryConfirmation?: boolean;
   }
