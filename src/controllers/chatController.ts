@@ -327,7 +327,7 @@ export const getChatById = async (req: AuthRequest, res: Response) => {
 export const sendMessage = async (req: AuthRequest, res: Response) => {
   try {
     const { chatId } = req.params;
-    const { content, messageType = "text", product, paymentRequest, inquiryId } = req.body;
+    const { content, messageType = "text", product, paymentRequest, inquiryId, negotiate } = req.body;
     const userId = req.user?._id;
 
     if (!content && messageType === "text") {
@@ -446,7 +446,32 @@ export const sendMessage = async (req: AuthRequest, res: Response) => {
       if (businessRecipient && req.user?.userType !== "business") {
         const autoReplyInquiryId = finalInquiryId || chat.activeInquiryId;
 
-        if (isInquiryMessage && normalizedProduct && autoReplyInquiryId) {
+        // When user presses "Negotiate" button, always auto-reply
+        if (negotiate) {
+          const negotiateReplyText = "We'll reply you shortly.";
+          const autoReplyMessage: IMessage = {
+            chat: chat._id,
+            sender: new Types.ObjectId(businessRecipient._id),
+            content: negotiateReplyText,
+            messageType: "text",
+            inquiryId: autoReplyInquiryId,
+            isRead: false,
+            createdAt: new Date(),
+          } as IMessage;
+          const savedAutoReply = await Message.create(autoReplyMessage);
+          chat.lastMessage = {
+            content: negotiateReplyText,
+            sender: new Types.ObjectId(businessRecipient._id),
+            createdAt: new Date(),
+          };
+          await chat.save();
+          emitRealtimeChatEvent(
+            chat,
+            businessRecipient._id.toString(),
+            savedAutoReply.toObject(),
+            activeInquiry
+          );
+        } else if (isInquiryMessage && normalizedProduct && autoReplyInquiryId) {
           const existingAutoProductReply = await Message.findOne({
             chat: chat._id,
             sender: businessRecipient._id,

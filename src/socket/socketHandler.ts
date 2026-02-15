@@ -37,6 +37,8 @@ interface MessagePayload {
   paymentRequest?: {
     amount: number;
   };
+  // When user presses "Negotiate" button
+  negotiate?: boolean;
 }
 
 // Store local online sockets per user (fallback/debug)
@@ -130,7 +132,7 @@ export async function initializeSocket(server: HttpServer) {
     // --- Send Message ---
     socket.on("send-message", async (payload: MessagePayload) => {
       try {
-        const { chatId, content, messageType = "text", product, paymentRequest, startInquiry, inquiryId, replyTo } = payload;
+        const { chatId, content, messageType = "text", product, paymentRequest, startInquiry, inquiryId, replyTo, negotiate } = payload;
 
         if (!socket.userId) {
           socket.emit("error", { message: "Not authenticated" });
@@ -284,7 +286,38 @@ export async function initializeSocket(server: HttpServer) {
           if (businessRecipient && socket.userType !== "business") {
             const isInquiryMessage = messageType === "inquiry" || startInquiry;
             const autoReplyInquiryId = finalInquiryId || chat.activeInquiryId;
-            console.log("[AUTO-REPLY DEBUG] isInquiryMessage:", isInquiryMessage, "autoReplyInquiryId:", autoReplyInquiryId);
+            console.log("[AUTO-REPLY DEBUG] isInquiryMessage:", isInquiryMessage, "autoReplyInquiryId:", autoReplyInquiryId, "negotiate:", negotiate);
+
+            // When user presses "Negotiate" button, always auto-reply
+            if (negotiate) {
+              const negotiateReplyText = "We'll reply you shortly.";
+              const autoReplyMessage = {
+                _id: new Types.ObjectId(),
+                chat: chat._id,
+                sender: new Types.ObjectId(businessRecipient._id),
+                content: negotiateReplyText,
+                messageType: "text" as const,
+                inquiryId: autoReplyInquiryId,
+                isRead: false,
+                createdAt: new Date(),
+              };
+              const savedAutoReply = await Message.create(autoReplyMessage);
+              chat.lastMessage = {
+                content: negotiateReplyText,
+                sender: new Types.ObjectId(businessRecipient._id),
+                createdAt: new Date(),
+              };
+              await chat.save();
+              io.to(chatId).emit("new-message", {
+                chatId,
+                message: {
+                  ...savedAutoReply.toObject(),
+                  sender: { _id: businessRecipient._id.toString() },
+                },
+                activeInquiry: activeInquiry || null,
+              });
+              // Skip further auto-reply logic for negotiate messages
+            } else {
 
             const resolveInquiryProduct = () => {
               if (product?.postId && Types.ObjectId.isValid(String(product.postId))) {
@@ -411,6 +444,7 @@ export async function initializeSocket(server: HttpServer) {
             } else {
               console.log("[AUTO-REPLY DEBUG] Skipped text auto-reply (autoReplyEnabled:", businessRecipient.autoReplyEnabled, ", isInquiry:", isInquiryMessage, ")");
             }
+            } // end negotiate else block
           } else {
             console.log("[AUTO-REPLY DEBUG] ❌ Skipped: no business recipient or sender is business");
           }
