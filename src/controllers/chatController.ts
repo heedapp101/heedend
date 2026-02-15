@@ -440,7 +440,6 @@ export const sendMessage = async (req: AuthRequest, res: Response) => {
       const businessRecipient = await User.findOne({
         _id: { $in: recipientIds },
         userType: "business",
-        autoReplyEnabled: true,
       }).select("autoReplyEnabled autoReplyMessage");
 
       if (businessRecipient && req.user?.userType !== "business") {

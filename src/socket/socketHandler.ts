@@ -395,8 +395,8 @@ export async function initializeSocket(server: HttpServer) {
                   activeInquiry: activeInquiry || null,
                 });
               }
-            } else if (businessRecipient.autoReplyEnabled) {
-              console.log("[AUTO-REPLY DEBUG] Not an inquiry message, sending text auto-reply (autoReplyEnabled=true)");
+            } else {
+              console.log("[AUTO-REPLY DEBUG] Not an inquiry message, sending text auto-reply");
               const autoReplyText =
                 businessRecipient.autoReplyMessage?.trim() ||
                 "Thanks for your message. We will reply soon.";
@@ -441,8 +441,6 @@ export async function initializeSocket(server: HttpServer) {
                   activeInquiry: activeInquiry || null,
                 });
               }
-            } else {
-              console.log("[AUTO-REPLY DEBUG] Skipped text auto-reply (autoReplyEnabled:", businessRecipient.autoReplyEnabled, ", isInquiry:", isInquiryMessage, ")");
             }
             } // end negotiate else block
           } else {
