@@ -43,7 +43,6 @@ export interface IMessage extends Document {
     orderNumber: string;
     itemName?: string;
   };
-  expiresAt?: Date;
   isRead: boolean;
   createdAt: Date;
   updatedAt: Date;
