@@ -37,10 +37,12 @@ const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
   pending: "Pending",
   confirmed: "Confirmed",
   processing: "Processing",
+  shipping_initiated: "Shipping Initiated",
   shipped: "Shipped",
   out_for_delivery: "Out for Delivery",
   delivered: "Delivered",
   cancelled: "Cancelled",
+  disputed: "Disputed",
   refund_requested: "Refund Requested",
   refunded: "Refunded",
 };
@@ -178,6 +180,7 @@ const sendOrderUpdateMessage = async (
     trackingLink?: string;
     estimatedDelivery?: Date;
     isDeliveryConfirmation?: boolean;
+    itemName?: string;
   }
 ): Promise<void> => {
   try {
@@ -185,36 +188,44 @@ const sendOrderUpdateMessage = async (
     if (!chat) return;
 
     const typedChat = chat as any;
+    const productLabel = options?.itemName ? `"${options.itemName}"` : "";
+    const orderLabel = productLabel ? `${productLabel} (Order #${orderNumber})` : `Order #${orderNumber}`;
 
     let content: string;
     let messageType: "order-update" | "delivery-confirmation" = "order-update";
 
     if (options?.isDeliveryConfirmation) {
       messageType = "delivery-confirmation";
-      content = `📦 Your order #${orderNumber} has been marked as delivered! Please confirm if you received your order. If no response, it will be auto-confirmed in 48 hours.`;
+      content = `📦 Your order ${orderLabel} has been marked as delivered! Please confirm if you received your order. If no response, it will be auto-confirmed in 48 hours.`;
     } else {
       // Generate user-friendly message based on status
       switch (newStatus) {
         case "confirmed":
-          content = `✅ Great news! Your order #${orderNumber} has been confirmed by the seller.`;
+          content = `✅ Great news! Your order ${orderLabel} has been confirmed by the seller.`;
           break;
         case "processing":
-          content = `🔧 Your order #${orderNumber} is now being processed and prepared for shipping.`;
+          content = `🔧 Your order ${orderLabel} is now being processed and prepared for shipping.`;
+          break;
+        case "shipping_initiated":
+          content = `📦 Your order ${orderLabel} shipping has been initiated! The seller is preparing to ship your order. Cancellation is no longer available.`;
           break;
         case "shipped":
-          content = `🚚 Your order #${orderNumber} has been shipped!${options?.trackingNumber ? ` Tracking: ${options.trackingNumber}` : ""}${options?.trackingLink ? `\n📎 Track here: ${options.trackingLink}` : ""}`;
+          content = `🚚 Your order ${orderLabel} has been shipped!${options?.trackingNumber ? ` Tracking: ${options.trackingNumber}` : ""}${options?.estimatedDelivery ? `\n📅 Estimated delivery: ${new Date(options.estimatedDelivery).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}` : ""}${options?.trackingLink ? `\n📎 Track here: ${options.trackingLink}` : ""}`;
           break;
         case "out_for_delivery":
-          content = `📍 Your order #${orderNumber} is out for delivery! It should arrive today.`;
+          content = `📍 Your order ${orderLabel} is out for delivery! It should arrive today.`;
           break;
         case "delivered":
-          content = `🎉 Your order #${orderNumber} has been delivered! Thank you for shopping with us.`;
+          content = `🎉 Your order ${orderLabel} has been delivered! Thank you for shopping with us.`;
           break;
         case "cancelled":
-          content = `❌ Your order #${orderNumber} has been cancelled.`;
+          content = `❌ Your order ${orderLabel} has been cancelled.`;
+          break;
+        case "disputed":
+          content = `⚠️ A dispute has been raised for order ${orderLabel}. Our team will review this shortly.`;
           break;
         default:
-          content = `📋 Order #${orderNumber} status updated to ${ORDER_STATUS_LABELS[newStatus]}.`;
+          content = `📋 ${orderLabel} status updated to ${ORDER_STATUS_LABELS[newStatus]}.`;
       }
     }
 
@@ -524,6 +535,40 @@ export const createOrder = async (req: AuthRequest, res: Response) => {
 };
 
 /**
+ * Get orders between current user and another user (for chat pinned order)
+ * GET /api/orders/between/:userId
+ */
+export const getOrdersBetweenUsers = async (req: AuthRequest, res: Response) => {
+  try {
+    const currentUserId = req.user?._id;
+    const { userId } = req.params;
+
+    if (!currentUserId || !userId) {
+      return res.status(400).json({ message: "Missing user information" });
+    }
+
+    // Find orders where current user is buyer and other is seller, or vice versa
+    const orders = await Order.find({
+      $or: [
+        { buyer: currentUserId, seller: userId },
+        { buyer: userId, seller: currentUserId },
+      ],
+      status: { $nin: ["cancelled", "refunded"] },
+    })
+      .populate("buyer", "username name profilePic")
+      .populate("seller", "username name profilePic companyName")
+      .populate("items.post", "title images price")
+      .sort({ createdAt: -1 })
+      .limit(5);
+
+    res.json({ orders });
+  } catch (error: any) {
+    console.error("Get orders between users error:", error);
+    res.status(500).json({ message: "Failed to fetch orders", error: error.message });
+  }
+};
+
+/**
  * Get buyer's orders
  * GET /api/orders/my-orders
  */
@@ -615,11 +660,13 @@ export const cancelOrder = async (req: AuthRequest, res: Response) => {
       return res.status(403).json({ message: "Not authorized to cancel this order" });
     }
 
-    // Can only cancel if not yet shipped
+    // Can only cancel if not yet shipping_initiated
     const cancellableStatuses: OrderStatus[] = ["pending", "confirmed", "processing"];
     if (!cancellableStatuses.includes(order.status)) {
       return res.status(400).json({ 
-        message: "Order cannot be cancelled at this stage. Please request a refund instead." 
+        message: order.status === "shipping_initiated" 
+          ? "Order cannot be cancelled after shipping has been initiated."
+          : "Order cannot be cancelled at this stage. Please request a refund instead." 
       });
     }
 
@@ -648,6 +695,28 @@ export const cancelOrder = async (req: AuthRequest, res: Response) => {
     }
 
     await order.save();
+
+    // Send cancellation message to chat
+    const firstItemName = order.items?.[0]?.title || "";
+    const itemLabel = order.items?.length > 1 ? `${firstItemName} +${order.items.length - 1} more` : firstItemName;
+    await sendOrderUpdateMessage(
+      new mongoose.Types.ObjectId(userId),
+      order.seller,
+      order.orderNumber,
+      order._id,
+      "cancelled",
+      "pending", // previous status doesn't matter much for cancel messages
+      { itemName: itemLabel }
+    );
+
+    // 🔔 Notify seller about cancellation
+    await notifyOrderStatus(
+      order.seller.toString(),
+      order._id.toString(),
+      order.orderNumber,
+      "cancelled",
+      false // isBuyer = false (notification goes to seller)
+    );
 
     res.json({ message: "Order cancelled successfully", order });
   } catch (error: any) {
@@ -696,6 +765,82 @@ export const requestRefund = async (req: AuthRequest, res: Response) => {
   } catch (error: any) {
     console.error("Request refund error:", error);
     res.status(500).json({ message: "Failed to request refund", error: error.message });
+  }
+};
+
+/**
+ * Dispute order (buyer) — 24hr window after delivery
+ * POST /api/orders/:orderId/dispute
+ */
+export const disputeOrder = async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user?._id;
+    const { orderId } = req.params;
+    const { reason } = req.body;
+
+    const order = await Order.findById(orderId);
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    if (order.buyer.toString() !== userId?.toString()) {
+      return res.status(403).json({ message: "Not authorized" });
+    }
+
+    // Can only dispute if delivered
+    if (order.status !== "delivered") {
+      return res.status(400).json({ message: "Can only dispute delivered orders" });
+    }
+
+    // 24-hour window check
+    if (order.deliveredAt) {
+      const deliveredTime = new Date(order.deliveredAt).getTime();
+      const disputeDeadline = deliveredTime + 24 * 60 * 60 * 1000;
+      if (Date.now() > disputeDeadline) {
+        return res.status(400).json({
+          message: "Dispute window has closed. You can only dispute within 24 hours of delivery.",
+        });
+      }
+    }
+
+    order.status = "disputed";
+    (order as any).disputeReason = reason || "Buyer raised a dispute";
+    (order as any).disputedAt = new Date();
+    order.statusHistory.push({
+      status: "disputed",
+      timestamp: new Date(),
+      note: reason || "Buyer raised a dispute",
+      updatedBy: new mongoose.Types.ObjectId(userId),
+    });
+
+    await order.save();
+
+    // Send dispute message to chat
+    const firstItemName = order.items?.[0]?.title || "";
+    const itemLabel = order.items?.length > 1 ? `${firstItemName} +${order.items.length - 1} more` : firstItemName;
+    await sendOrderUpdateMessage(
+      new mongoose.Types.ObjectId(userId),
+      order.seller,
+      order.orderNumber,
+      order._id,
+      "disputed",
+      "delivered",
+      { itemName: itemLabel }
+    );
+
+    // Notify seller about dispute
+    await notifyOrderStatus(
+      order.seller.toString(),
+      order._id.toString(),
+      order.orderNumber,
+      "disputed",
+      false
+    );
+
+    res.json({ message: "Dispute raised successfully", order });
+  } catch (error: any) {
+    console.error("Dispute order error:", error);
+    res.status(500).json({ message: "Failed to raise dispute", error: error.message });
   }
 };
 
@@ -749,9 +894,11 @@ export const getSellerOrders = async (req: AuthRequest, res: Response) => {
       pending: 0,
       confirmed: 0,
       processing: 0,
+      shipping_initiated: 0,
       shipped: 0,
       delivered: 0,
       cancelled: 0,
+      disputed: 0,
       totalRevenue: 0,
       totalOrders: total,
     };
@@ -760,7 +907,7 @@ export const getSellerOrders = async (req: AuthRequest, res: Response) => {
       if (s._id in formattedStats) {
         (formattedStats as any)[s._id] = s.count;
       }
-      if (["delivered", "shipped", "out_for_delivery"].includes(s._id)) {
+      if (["delivered", "shipped", "out_for_delivery", "shipping_initiated"].includes(s._id)) {
         formattedStats.totalRevenue += s.revenue;
       }
     });
@@ -803,12 +950,14 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
     // Validate status transition
     const validTransitions: Record<OrderStatus, OrderStatus[]> = {
       pending: ["confirmed", "cancelled"],
-      confirmed: ["processing", "cancelled"],
-      processing: ["shipped", "cancelled"],
+      confirmed: ["shipping_initiated", "cancelled"],
+      processing: ["shipping_initiated", "cancelled"],
+      shipping_initiated: ["shipped"],
       shipped: ["out_for_delivery", "delivered"],
       out_for_delivery: ["delivered"],
-      delivered: ["refund_requested"],
+      delivered: ["disputed", "refund_requested"],
       cancelled: [],
+      disputed: ["refunded"],
       refund_requested: ["refunded"],
       refunded: [],
     };
@@ -816,6 +965,13 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
     if (!validTransitions[order.status]?.includes(status)) {
       return res.status(400).json({ 
         message: `Cannot transition from ${order.status} to ${status}` 
+      });
+    }
+
+    // Require tracking number for shipped status
+    if (status === "shipped" && !trackingNumber) {
+      return res.status(400).json({
+        message: "Tracking number is required to mark order as shipped."
       });
     }
 
@@ -847,6 +1003,8 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
     await order.save();
 
     // Send order update notification via chat
+    const firstItemName = order.items?.[0]?.title || "";
+    const itemLabel = order.items?.length > 1 ? `${firstItemName} +${order.items.length - 1} more` : firstItemName;
     await sendOrderUpdateMessage(
       new mongoose.Types.ObjectId(sellerId),
       order.buyer,
@@ -859,6 +1017,7 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
         trackingLink: (order as any).trackingLink,
         estimatedDelivery: order.estimatedDelivery,
         isDeliveryConfirmation: status === "delivered" || status === "out_for_delivery",
+        itemName: itemLabel,
       }
     );
 

@@ -26,6 +26,7 @@ import notificationRoutes from "./routes/notificationRoutes.js"; // ✅ NOTIFICA
 import searchRoutes from "./routes/searchRoutes.js"; // ✅ SEARCH ROUTES
 import contactRoutes from "./routes/contactRoutes.js"; // ✅ CONTACT ROUTES
 import legalRoutes from "./routes/legalRoutes.js"; // ✅ LEGAL ROUTES
+import addressRoutes from "./routes/addressRoutes.js"; // ✅ ADDRESS ROUTES
 
 // Error handling middleware
 import { errorHandler, notFoundHandler } from "./middleware/errorMiddleware.js";
@@ -179,6 +180,7 @@ app.use("/api/notifications", notificationRoutes); // ✅ NOTIFICATION ROUTES
 app.use("/api/search", searchRoutes); // ✅ SEARCH ROUTES
 app.use("/api/contact", contactRoutes); // ✅ CONTACT ROUTES
 app.use("/api/legal", legalRoutes); // ✅ LEGAL ROUTES
+app.use("/api/addresses", addressRoutes); // ✅ SAVED ADDRESS ROUTES
 
 // Health check endpoint
 app.get("/health", (req, res) => {

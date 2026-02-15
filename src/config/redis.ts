@@ -1,6 +1,6 @@
 ﻿import { createClient, RedisClientType } from "redis";
 
-const redisUrl = process.env.REDIS_URL || "redis://localhost:6379";
+const getRedisUrlFromEnv = () => process.env.REDIS_URL || "redis://localhost:6379";
 
 let commandClient: RedisClientType | null = null;
 let pubClient: RedisClientType | null = null;
@@ -12,11 +12,11 @@ const attachErrorLogger = (client: RedisClientType, label: string) => {
   });
 };
 
-export const getRedisUrl = () => redisUrl;
+export const getRedisUrl = () => getRedisUrlFromEnv();
 
 export const getRedisCommandClient = async (): Promise<RedisClientType> => {
   if (!commandClient) {
-    commandClient = createClient({ url: redisUrl });
+    commandClient = createClient({ url: getRedisUrlFromEnv() });
     attachErrorLogger(commandClient, "command");
   }
   if (!commandClient.isOpen) {
@@ -30,7 +30,7 @@ export const getRedisPubSubClients = async (): Promise<{
   subClient: RedisClientType;
 }> => {
   if (!pubClient) {
-    pubClient = createClient({ url: redisUrl });
+    pubClient = createClient({ url: getRedisUrlFromEnv() });
     attachErrorLogger(pubClient, "pub");
   }
   if (!pubClient.isOpen) {

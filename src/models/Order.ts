@@ -1,20 +1,25 @@
 import mongoose, { Schema, Document } from "mongoose";
 
 // Order Status Flow:
-// pending -> confirmed -> processing -> shipped -> delivered
-// pending -> cancelled (can be cancelled before shipped)
+// pending -> confirmed -> shipping_initiated -> shipped -> delivered
+// pending -> cancelled (can be cancelled before shipping_initiated)
+// Once shipping_initiated, cancellation is blocked
+// shipped requires tracking ID + estimated delivery
+// delivered -> disputed (24hr window) -> refunded
 // Any status can go to -> refund_requested -> refunded
 
 export type OrderStatus = 
-  | "pending"           // Order placed, waiting for seller confirmation
-  | "confirmed"         // Seller confirmed the order
-  | "processing"        // Order is being prepared
-  | "shipped"           // Order has been shipped
-  | "out_for_delivery"  // Order is out for delivery
-  | "delivered"         // Order delivered successfully
-  | "cancelled"         // Order cancelled
-  | "refund_requested"  // Buyer requested refund
-  | "refunded";         // Refund completed
+  | "pending"              // Order placed, waiting for seller confirmation
+  | "confirmed"            // Seller confirmed the order
+  | "processing"           // Order is being prepared (legacy, not used in new flow)
+  | "shipping_initiated"   // Seller initiated shipping (no cancellation after this)
+  | "shipped"              // Order has been shipped (requires tracking ID)
+  | "out_for_delivery"     // Order is out for delivery
+  | "delivered"            // Order delivered successfully
+  | "cancelled"            // Order cancelled
+  | "disputed"             // Buyer raised a dispute (within 24hr of delivery)
+  | "refund_requested"     // Buyer requested refund
+  | "refunded";            // Refund completed
 
 export type PaymentMethod = "cod" | "online";
 export type PaymentStatus = "pending" | "completed" | "failed" | "refunded";
@@ -85,6 +90,10 @@ export interface IOrder extends Document {
   refundAmount?: number;
   refundReason?: string;
   
+  // Dispute
+  disputeReason?: string;
+  disputedAt?: Date;
+  
   createdAt: Date;
   updatedAt: Date;
 }
@@ -119,7 +128,7 @@ const statusHistorySchema = new Schema(
   {
     status: { 
       type: String, 
-      enum: ["pending", "confirmed", "processing", "shipped", "out_for_delivery", "delivered", "cancelled", "refund_requested", "refunded"],
+      enum: ["pending", "confirmed", "processing", "shipping_initiated", "shipped", "out_for_delivery", "delivered", "cancelled", "disputed", "refund_requested", "refunded"],
       required: true 
     },
     timestamp: { type: Date, default: Date.now },
@@ -167,7 +176,7 @@ const orderSchema = new Schema<IOrder>(
     // Status
     status: { 
       type: String, 
-      enum: ["pending", "confirmed", "processing", "shipped", "out_for_delivery", "delivered", "cancelled", "refund_requested", "refunded"],
+      enum: ["pending", "confirmed", "processing", "shipping_initiated", "shipped", "out_for_delivery", "delivered", "cancelled", "disputed", "refund_requested", "refunded"],
       default: "pending" 
     },
     statusHistory: { type: [statusHistorySchema], default: [] },
@@ -182,6 +191,10 @@ const orderSchema = new Schema<IOrder>(
     cancelledBy: { type: Schema.Types.ObjectId, ref: "User" },
     refundAmount: { type: Number },
     refundReason: { type: String },
+    
+    // Dispute
+    disputeReason: { type: String },
+    disputedAt: { type: Date },
   },
   { timestamps: true }
 );

@@ -6,6 +6,7 @@ import {
   getOrderById,
   cancelOrder,
   requestRefund,
+  disputeOrder,
   getSellerOrders,
   updateOrderStatus,
   addSellerNotes,
@@ -13,6 +14,7 @@ import {
   getSellerStats,
   confirmDelivery,
   autoConfirmDeliveries,
+  getOrdersBetweenUsers,
 } from "../controllers/orderController.js";
 
 const router = express.Router();
@@ -27,6 +29,10 @@ router.get("/seller/stats", requireAuth, getSellerStats);
 // ==================== ADMIN/CRON ROUTES ====================
 // Auto-confirm old deliveries (for cron job)
 router.post("/auto-confirm-deliveries", requireAuth, autoConfirmDeliveries);
+
+// ==================== SHARED ROUTES ====================
+// Get orders between current user and another user (for chat pinned order)
+router.get("/between/:userId", requireAuth, getOrdersBetweenUsers);
 
 // ==================== BUYER ROUTES ====================
 // Create new order
@@ -43,6 +49,9 @@ router.post("/:orderId/cancel", requireAuth, cancelOrder);
 
 // Request refund
 router.post("/:orderId/refund", requireAuth, requestRefund);
+
+// Dispute order (buyer, 24hr window after delivery)
+router.post("/:orderId/dispute", requireAuth, disputeOrder);
 
 // Confirm delivery (buyer confirms they received the order)
 router.post("/:orderId/confirm-delivery", requireAuth, confirmDelivery);

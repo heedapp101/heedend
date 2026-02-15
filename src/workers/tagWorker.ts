@@ -25,7 +25,7 @@ export function initializeTagWorker() {
 
   console.log("Tag Generation Worker initialized");
 
-  const workerConnection = tagQueueConnection.duplicate();
+  const workerConnection = tagQueueConnection().duplicate();
   worker = new Worker(
     QUEUE_NAME,
     async (job) => {
@@ -75,7 +75,7 @@ export function initializeTagWorker() {
   });
 
   const queueEvents = new QueueEvents(QUEUE_NAME, {
-    connection: tagQueueConnection.duplicate(),
+    connection: tagQueueConnection().duplicate(),
   });
 
   queueEvents.on("error", (err) => {

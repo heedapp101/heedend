@@ -12,6 +12,13 @@ import { interestBuffer } from "../utils/InterestBuffer.js";
 import { notifyFollow } from "../utils/notificationService.js";
 import PostLike from "../models/PostLike.js";
 import PostView from "../models/PostView.js";
+import UserReport from "../models/UserReport.js";
+import { Chat } from "../models/Chat.js";
+import Message from "../models/Message.js";
+import Order from "../models/Order.js";
+import Report from "../models/Report.js";
+import RecommendationAnalytics from "../models/RecommendationAnalytics.js";
+import { deleteFiles } from "../utils/cloudflareR2.js";
 
 const hasPaymentDetails = (details?: Record<string, any>): boolean => {
   if (!details) return false;
@@ -687,7 +694,7 @@ export const removePushToken = async (req: AuthRequest, res: Response) => {
   }
 };
 
-// DELETE MY ACCOUNT (Soft-delete with data cleanup)
+// DELETE MY ACCOUNT (Soft-delete with full data cleanup)
 export const deleteMyAccount = async (req: AuthRequest, res: Response) => {
   try {
     if (!req.user) return res.status(401).json({ message: "Unauthorized" });
@@ -698,13 +705,55 @@ export const deleteMyAccount = async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ message: "Account already deleted" });
     }
 
+    const userId = user._id;
     const { reason } = req.body as { reason?: string };
     const deletedAt = new Date();
 
-    // Remove user from follow graph and decrement counts
+    // ──────────────────────────────────────────────
+    // 1) Check for active orders (prevent deletion if orders are in progress)
+    // ──────────────────────────────────────────────
+    const activeOrderStatuses = ["pending", "confirmed", "processing", "shipped"];
+    const activeOrderCount = await Order.countDocuments({
+      $or: [{ buyer: userId }, { seller: userId }],
+      status: { $in: activeOrderStatuses },
+    });
+
+    if (activeOrderCount > 0) {
+      return res.status(400).json({
+        message: `Cannot delete account while you have ${activeOrderCount} active order(s). Please complete or cancel them first.`,
+      });
+    }
+
+    // ──────────────────────────────────────────────
+    // 2) Collect all R2 image URLs for bulk deletion
+    // ──────────────────────────────────────────────
+    const imageUrlsToDelete: string[] = [];
+
+    // User's profile pic and banner
+    if (user.profilePic) imageUrlsToDelete.push(user.profilePic);
+    if (user.bannerImg) imageUrlsToDelete.push(user.bannerImg);
+
+    // All images from user's posts (high + low + grid variants)
+    const userPosts = await ImagePost.find({ user: userId }).select("images").lean();
+    for (const post of userPosts) {
+      if (Array.isArray(post.images)) {
+        for (const img of post.images) {
+          if (img.high) imageUrlsToDelete.push(img.high);
+          if (img.low) imageUrlsToDelete.push(img.low);
+          if (img.grid) imageUrlsToDelete.push(img.grid);
+        }
+      }
+    }
+
+    // ID proof document
+    if (user.idProofUrl) imageUrlsToDelete.push(user.idProofUrl);
+
+    // ──────────────────────────────────────────────
+    // 3) Remove from follow graph and fix counts
+    // ──────────────────────────────────────────────
     const [followersDocs, followingDocs] = await Promise.all([
-      Follow.find({ following: user._id }).select("follower").lean(),
-      Follow.find({ follower: user._id }).select("following").lean(),
+      Follow.find({ following: userId }).select("follower").lean(),
+      Follow.find({ follower: userId }).select("following").lean(),
     ]);
 
     const followerIds = followersDocs.map((f: any) => f.follower);
@@ -714,29 +763,74 @@ export const deleteMyAccount = async (req: AuthRequest, res: Response) => {
       followerIds.length
         ? User.updateMany(
             { _id: { $in: followerIds } },
-            { $inc: { followingCount: -1 }, $max: { followingCount: 0 } }
+            { $inc: { followingCount: -1 } }
           )
         : Promise.resolve(),
       followingIds.length
         ? User.updateMany(
             { _id: { $in: followingIds } },
-            { $inc: { followersCount: -1 }, $max: { followersCount: 0 } }
+            { $inc: { followersCount: -1 } }
           )
         : Promise.resolve(),
-      Follow.deleteMany({ $or: [{ follower: user._id }, { following: user._id }] }),
+      Follow.deleteMany({ $or: [{ follower: userId }, { following: userId }] }),
     ]);
 
-    // Delete user-generated content
-    await ImagePost.deleteMany({ user: user._id });
-    await Collection.deleteMany({ user: user._id });
-    await Comment.deleteMany({ user: user._id });
-    await Notification.deleteMany({ $or: [{ recipient: user._id }, { sender: user._id }] });
-    await PostLike.deleteMany({ user: user._id });
-    await PostView.deleteMany({ user: user._id });
+    // Ensure counts don't go negative
+    await User.updateMany(
+      { _id: { $in: [...followerIds, ...followingIds] }, $or: [{ followersCount: { $lt: 0 } }, { followingCount: { $lt: 0 } }] },
+      [{ $set: { followersCount: { $max: ["$followersCount", 0] }, followingCount: { $max: ["$followingCount", 0] } } }]
+    );
 
-    // Anonymize the user and mark as deleted
-    const anonymizedEmail = `deleted+${user._id.toString()}@heed.app`;
-    const anonymizedUsername = `deleted_${user._id.toString().slice(-8)}`;
+    // ──────────────────────────────────────────────
+    // 4) Delete user-generated content
+    // ──────────────────────────────────────────────
+    await Promise.all([
+      ImagePost.deleteMany({ user: userId }),
+      Collection.deleteMany({ user: userId }),
+      Comment.deleteMany({ user: userId }),
+      Notification.deleteMany({ $or: [{ recipient: userId }, { sender: userId }] }),
+      PostLike.deleteMany({ user: userId }),
+      PostView.deleteMany({ user: userId }),
+      RecommendationAnalytics.deleteMany({ userId }),
+    ]);
+
+    // ──────────────────────────────────────────────
+    // 5) Clean up chats and messages
+    // ──────────────────────────────────────────────
+    const userChats = await Chat.find({ participants: userId }).select("_id").lean();
+    const chatIds = userChats.map((c: any) => c._id);
+
+    if (chatIds.length > 0) {
+      await Promise.all([
+        Message.deleteMany({ chat: { $in: chatIds } }),
+        Chat.deleteMany({ _id: { $in: chatIds } }),
+      ]);
+    }
+
+    // ──────────────────────────────────────────────
+    // 6) Clean up reports
+    // ──────────────────────────────────────────────
+    await Promise.all([
+      Report.deleteMany({ reporter: userId }),
+      UserReport.deleteMany({ $or: [{ reporter: userId }, { reportedUser: userId }] }),
+    ]);
+
+    // ──────────────────────────────────────────────
+    // 7) Delete R2 files (non-blocking, best-effort)
+    // ──────────────────────────────────────────────
+    if (imageUrlsToDelete.length > 0) {
+      deleteFiles(imageUrlsToDelete).then((count) => {
+        console.log(`🗑️ Deleted ${count}/${imageUrlsToDelete.length} R2 files for user ${userId}`);
+      }).catch((err) => {
+        console.error(`❌ R2 cleanup error for user ${userId}:`, err);
+      });
+    }
+
+    // ──────────────────────────────────────────────
+    // 8) Anonymize and soft-delete the user
+    // ──────────────────────────────────────────────
+    const anonymizedEmail = `deleted+${userId.toString()}@heed.app`;
+    const anonymizedUsername = `deleted_${userId.toString().slice(-8)}`;
 
     user.email = anonymizedEmail;
     user.username = anonymizedUsername;
@@ -748,16 +842,75 @@ export const deleteMyAccount = async (req: AuthRequest, res: Response) => {
     user.location = "";
     user.interests = [];
     user.pushTokens = [];
+    user.companyName = undefined;
+    user.address = undefined;
+    user.gstNumber = undefined;
+    user.idProofType = undefined;
+    user.idProofNumber = undefined;
+    user.idProofUrl = undefined;
+    user.paymentDetails = {
+      upiId: "",
+      accountHolderName: "",
+      accountNumber: "",
+      ifsc: "",
+      bankName: "",
+      phone: "",
+      note: "",
+    };
     (user as any).isDeleted = true;
     (user as any).deletedAt = deletedAt;
     (user as any).deletedReason = reason?.trim() || "user_request";
     (user as any).deletedBy = "user";
+    (user as any).followersCount = 0;
+    (user as any).followingCount = 0;
 
     await user.save();
 
+    console.log(`✅ Account deleted: ${userId} (${anonymizedUsername})`);
     res.status(200).json({ success: true, deletedAt });
   } catch (err: any) {
     console.error("Delete Account Error:", err);
     res.status(500).json({ message: "Failed to delete account" });
+  }
+};
+
+// REPORT USER ACCOUNT
+export const reportUser = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ message: "Unauthorized" });
+
+    const { id } = req.params;
+    const { reason, customReason } = req.body;
+
+    if (!reason) return res.status(400).json({ message: "Reason is required" });
+
+    const validReasons = ["spam", "harassment", "inappropriate", "impersonation", "scam", "other"];
+    if (!validReasons.includes(reason)) {
+      return res.status(400).json({ message: "Invalid reason" });
+    }
+
+    if (id === req.user._id.toString()) {
+      return res.status(400).json({ message: "You cannot report yourself" });
+    }
+
+    const targetUser = await User.findById(id);
+    if (!targetUser) return res.status(404).json({ message: "User not found" });
+
+    const existingReport = await UserReport.findOne({ reportedUser: id, reporter: req.user._id });
+    if (existingReport) {
+      return res.status(409).json({ message: "You have already reported this account" });
+    }
+
+    await UserReport.create({
+      reportedUser: id,
+      reporter: req.user._id,
+      reason,
+      customReason: reason === "other" ? customReason?.slice(0, 500) : undefined,
+    });
+
+    res.status(201).json({ message: "Report submitted successfully" });
+  } catch (err: any) {
+    console.error("Report User Error:", err);
+    res.status(500).json({ message: "Failed to report user" });
   }
 };

@@ -71,3 +71,83 @@ export const uploadFile = async (file: Express.Multer.File, folder: string = "pu
     throw new Error("Failed to upload file to Cloudflare");
   }
 };
+
+/**
+ * Delete a file from Cloudflare R2 by its public URL or key.
+ * Accepts either a full URL (https://pub-xxx.r2.dev/public/...) or just the key ("public/...").
+ */
+export const deleteFile = async (urlOrKey: string): Promise<boolean> => {
+  try {
+    if (!urlOrKey) return false;
+
+    // Extract key from full URL if needed
+    let key = urlOrKey;
+    const publicUrl = process.env.CF_PUBLIC_URL;
+    if (publicUrl && urlOrKey.startsWith(publicUrl)) {
+      key = urlOrKey.replace(`${publicUrl}/`, "");
+    }
+    // Also handle if it starts with http
+    if (key.startsWith("http")) {
+      const url = new URL(key);
+      key = url.pathname.replace(/^\//, "");
+    }
+
+    if (!key) return false;
+
+    await s3.deleteObject({
+      Bucket: process.env.CF_BUCKET_NAME!,
+      Key: key,
+    }).promise();
+
+    return true;
+  } catch (err) {
+    console.error("❌ [deleteFile] Cloudflare R2 Delete Error:", (err as any).message);
+    return false;
+  }
+};
+
+/**
+ * Delete multiple files from Cloudflare R2.
+ * Returns the count of successfully deleted files.
+ */
+export const deleteFiles = async (urlsOrKeys: string[]): Promise<number> => {
+  if (!urlsOrKeys.length) return 0;
+
+  // R2 supports batch delete via deleteObjects (max 1000 per request)
+  const publicUrl = process.env.CF_PUBLIC_URL;
+  const keys = urlsOrKeys
+    .filter(Boolean)
+    .map((urlOrKey) => {
+      let key = urlOrKey;
+      if (publicUrl && urlOrKey.startsWith(publicUrl)) {
+        key = urlOrKey.replace(`${publicUrl}/`, "");
+      }
+      if (key.startsWith("http")) {
+        try { key = new URL(key).pathname.replace(/^\//, ""); } catch { return ""; }
+      }
+      return key;
+    })
+    .filter(Boolean);
+
+  if (!keys.length) return 0;
+
+  let deleted = 0;
+  // Process in batches of 1000
+  for (let i = 0; i < keys.length; i += 1000) {
+    const batch = keys.slice(i, i + 1000);
+    try {
+      await s3.deleteObjects({
+        Bucket: process.env.CF_BUCKET_NAME!,
+        Delete: {
+          Objects: batch.map((key) => ({ Key: key })),
+          Quiet: true,
+        },
+      }).promise();
+      deleted += batch.length;
+    } catch (err) {
+      console.error(`❌ [deleteFiles] Batch delete error (batch ${i / 1000 + 1}):`, (err as any).message);
+    }
+  }
+
+  return deleted;
+};

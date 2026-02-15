@@ -278,12 +278,13 @@ export async function initializeSocket(server: HttpServer) {
           const businessRecipient = await User.findOne({
             _id: { $in: recipientIds },
             userType: "business",
+            autoReplyEnabled: true,
           }).select("autoReplyEnabled autoReplyMessage userType");
 
           console.log("[AUTO-REPLY DEBUG] businessRecipient found:", businessRecipient ? { id: businessRecipient._id, autoReplyEnabled: businessRecipient.autoReplyEnabled, userType: (businessRecipient as any).userType } : null);
           console.log("[AUTO-REPLY DEBUG] sender is business?", socket.userType === "business");
 
-          if (businessRecipient && socket.userType !== "business") {
+          if (businessRecipient) {
             const isInquiryMessage = messageType === "inquiry" || startInquiry;
             const autoReplyInquiryId = finalInquiryId || chat.activeInquiryId;
             console.log("[AUTO-REPLY DEBUG] isInquiryMessage:", isInquiryMessage, "autoReplyInquiryId:", autoReplyInquiryId, "negotiate:", negotiate);
@@ -363,7 +364,7 @@ export async function initializeSocket(server: HttpServer) {
 
               if (!existingAutoProductReply) {
                 console.log("[AUTO-REPLY DEBUG] ✅ Sending product CTA auto-reply!");
-                const autoReplyCtaText = "Tap Buy Now or Negotiate below.";
+                const autoReplyCtaText = "📦 Product details";
                 const autoReplyMessage = {
                   _id: new Types.ObjectId(),
                   chat: chat._id,
@@ -444,7 +445,7 @@ export async function initializeSocket(server: HttpServer) {
             }
             } // end negotiate else block
           } else {
-            console.log("[AUTO-REPLY DEBUG] ❌ Skipped: no business recipient or sender is business");
+            console.log("[AUTO-REPLY DEBUG] ❌ Skipped: no business recipient with autoReplyEnabled=true");
           }
         } catch (autoReplyError) {
           console.error("[AUTO-REPLY DEBUG] ❌ Error in auto-reply:", autoReplyError);

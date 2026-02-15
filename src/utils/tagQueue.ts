@@ -6,26 +6,44 @@ export interface TagQueueJob {
   imageUrl: string;
 }
 
-const redisUrl = process.env.REDIS_URL || "redis://localhost:6379";
+let _tagQueueConnection: Redis | null = null;
+let _tagQueue: Queue<TagQueueJob> | null = null;
 
-export const tagQueueConnection = new Redis(redisUrl, {
-  maxRetriesPerRequest: null,
-  enableReadyCheck: false,
-});
+function getTagQueueConnection(): Redis {
+  if (!_tagQueueConnection) {
+    const redisUrl = process.env.REDIS_URL || "redis://localhost:6379";
+    _tagQueueConnection = new Redis(redisUrl, {
+      maxRetriesPerRequest: null,
+      enableReadyCheck: false,
+    });
+    _tagQueueConnection.on("error", (err: Error) => {
+      console.error("Tag queue Redis connection error:", err);
+    });
+  }
+  return _tagQueueConnection;
+}
 
-tagQueueConnection.on("error", (err: Error) => {
-  console.error("Tag queue Redis connection error:", err);
-});
+function getTagQueue(): Queue<TagQueueJob> {
+  if (!_tagQueue) {
+    _tagQueue = new Queue<TagQueueJob>("tag-generation", {
+      connection: getTagQueueConnection(),
+      defaultJobOptions: {
+        attempts: 3,
+        backoff: { type: "exponential", delay: 5000 },
+        removeOnComplete: 1000,
+        removeOnFail: 100,
+      },
+    });
+  }
+  return _tagQueue;
+}
 
-export const tagQueue = new Queue<TagQueueJob>("tag-generation", {
-  connection: tagQueueConnection,
-  defaultJobOptions: {
-    attempts: 3,
-    backoff: { type: "exponential", delay: 5000 },
-    removeOnComplete: 1000,
-    removeOnFail: 100,
-  },
-});
+export { getTagQueueConnection as tagQueueConnection };
+
+export const tagQueue = {
+  add: (...args: Parameters<Queue<TagQueueJob>['add']>) => getTagQueue().add(...args),
+  getJobCounts: (...args: Parameters<Queue<TagQueueJob>['getJobCounts']>) => getTagQueue().getJobCounts(...args),
+};
 
 /**
  * Helper function to add post to tag queue

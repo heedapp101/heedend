@@ -16,7 +16,8 @@ import {
   getFollowingList,
   savePushToken,
   removePushToken,
-  deleteMyAccount
+  deleteMyAccount,
+  reportUser
 } from "../controllers/userController.js";
 
 const router = Router();
@@ -42,5 +43,6 @@ router.delete("/me", requireAuth, deleteMyAccount);
 
 router.post("/collections", requireAuth, createCollection);
 router.post("/collections/:collectionId/toggle", requireAuth, toggleCollectionItem);
+router.post("/:id/report", requireAuth, reportUser);
 
 export default router;
