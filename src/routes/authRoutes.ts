@@ -9,7 +9,10 @@ import {
   checkUsername,
   checkDuplicates,
   sendOtp,
-  verifyOtp
+  verifyOtp,
+  forgotPasswordSendOtp,
+  forgotPasswordVerifyOtp,
+  forgotPasswordReset
 } from "../controllers/authController.js";
 import { upload } from "../middleware/upload.js";
 
@@ -28,6 +31,11 @@ router.post("/check-username", checkUsername);
 router.post("/check-duplicates", checkDuplicates);
 router.post("/send-otp", sendOtp);
 router.post("/verify-otp", verifyOtp);
+
+// ✅ Forgot Password flow
+router.post("/forgot-password/send-otp", forgotPasswordSendOtp);
+router.post("/forgot-password/verify-otp", forgotPasswordVerifyOtp);
+router.post("/forgot-password/reset", forgotPasswordReset);
 
 // ✅ New Route for Frontend Image Upload
 router.post("/upload-image", upload.single("file"), uploadImage);

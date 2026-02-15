@@ -7,6 +7,7 @@ import LegalDocument from "../models/LegalDocument.js";
 import { getPresignedUrl } from "../cloudflare.js";
 import { uploadFile, s3 } from "../utils/cloudflareR2.js";
 import { processImage } from "../utils/ProcessImage.js";
+import { sendOtpSMS } from "../services/twilioService.js";
 
 // In-memory OTP store (use Redis in production)
 const otpStore = new Map<string, { otp: string; expiresAt: number; verified: boolean }>();
@@ -124,12 +125,8 @@ export const sendOtp = async (req: Request, res: Response) => {
       }
     }, 5 * 60 * 1000);
 
-    // TODO: Integrate with SMS gateway (Twilio, MSG91, etc.)
-    // For development, log to console
-    console.log(`📱 [OTP] Sent to ${fullPhone}: ${otp}`);
-
-    // In production, send SMS here:
-    // await sendSMS(fullPhone, `Your Heed verification code is: ${otp}`);
+    // Send OTP via Twilio (falls back to console.log in dev if not configured)
+    await sendOtpSMS(fullPhone, otp);
 
     return res.status(200).json({ 
       message: "OTP sent successfully",
@@ -899,5 +896,160 @@ export const getPrivateDocument = async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error("❌ [GetDoc] Error:", error.message);
     res.status(500).json({ message: "Failed to retrieve document" });
+  }
+};
+
+/* =======================
+   FORGOT PASSWORD - SEND OTP
+   Sends OTP to the phone number linked to the account
+======================= */
+export const forgotPasswordSendOtp = async (req: Request, res: Response) => {
+  try {
+    const { phone, countryCode = "+91" } = req.body;
+
+    if (!phone || !/^\d{10}$/.test(phone)) {
+      return res.status(400).json({ message: "Please provide a valid 10-digit phone number" });
+    }
+
+    const fullPhone = `${countryCode}${phone}`;
+
+    // Check if a user with this phone exists
+    const user = await User.findOne({ phone: fullPhone, isDeleted: { $ne: true } });
+    if (!user) {
+      // Don't reveal whether the phone exists (security best practice)
+      // But for better UX in this app, we tell the user
+      return res.status(404).json({ message: "No account found with this phone number" });
+    }
+
+    // Generate 6-digit OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = Date.now() + 5 * 60 * 1000; // 5 minutes
+
+    // Store OTP with purpose "forgot-password"
+    otpStore.set(`fp_${fullPhone}`, { otp, expiresAt, verified: false });
+
+    // Clean up after expiry
+    setTimeout(() => {
+      const stored = otpStore.get(`fp_${fullPhone}`);
+      if (stored && stored.expiresAt < Date.now()) {
+        otpStore.delete(`fp_${fullPhone}`);
+      }
+    }, 5 * 60 * 1000);
+
+    // Send OTP via Twilio
+    await sendOtpSMS(fullPhone, otp);
+
+    return res.status(200).json({
+      message: "OTP sent successfully",
+      // Only include test OTP in development
+      ...(process.env.NODE_ENV === "development" && { testOtp: otp }),
+    });
+  } catch (error: any) {
+    console.error("Forgot Password Send OTP Error:", error);
+    return res.status(500).json({ message: "Failed to send OTP" });
+  }
+};
+
+/* =======================
+   FORGOT PASSWORD - VERIFY OTP
+   Verifies the OTP and returns a reset token
+======================= */
+export const forgotPasswordVerifyOtp = async (req: Request, res: Response) => {
+  try {
+    const { phone, countryCode = "+91", otp } = req.body;
+
+    if (!phone || !otp) {
+      return res.status(400).json({ message: "Phone and OTP are required" });
+    }
+
+    const fullPhone = `${countryCode}${phone}`;
+    const stored = otpStore.get(`fp_${fullPhone}`);
+
+    if (!stored) {
+      return res.status(400).json({ message: "OTP expired or not found. Please request a new one." });
+    }
+
+    if (stored.expiresAt < Date.now()) {
+      otpStore.delete(`fp_${fullPhone}`);
+      return res.status(400).json({ message: "OTP has expired. Please request a new one." });
+    }
+
+    if (stored.otp !== otp) {
+      return res.status(400).json({ message: "Invalid OTP. Please try again." });
+    }
+
+    // Mark as verified
+    stored.verified = true;
+    otpStore.set(`fp_${fullPhone}`, stored);
+
+    // Generate a short-lived reset token (10 minutes)
+    const user = await User.findOne({ phone: fullPhone, isDeleted: { $ne: true } });
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const resetToken = jwt.sign(
+      { _id: user._id, purpose: "password-reset" },
+      process.env.JWT_SECRET!,
+      { expiresIn: "10m" }
+    );
+
+    return res.status(200).json({
+      message: "OTP verified successfully",
+      verified: true,
+      resetToken,
+    });
+  } catch (error: any) {
+    console.error("Forgot Password Verify OTP Error:", error);
+    return res.status(500).json({ message: "Failed to verify OTP" });
+  }
+};
+
+/* =======================
+   FORGOT PASSWORD - RESET PASSWORD
+   Sets a new password using the reset token
+======================= */
+export const forgotPasswordReset = async (req: Request, res: Response) => {
+  try {
+    const { resetToken, newPassword } = req.body;
+
+    if (!resetToken || !newPassword) {
+      return res.status(400).json({ message: "Reset token and new password are required" });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({ message: "Password must be at least 6 characters" });
+    }
+
+    // Verify reset token
+    let decoded: any;
+    try {
+      decoded = jwt.verify(resetToken, process.env.JWT_SECRET!);
+    } catch (err) {
+      return res.status(400).json({ message: "Reset token expired or invalid. Please start over." });
+    }
+
+    if (decoded.purpose !== "password-reset") {
+      return res.status(400).json({ message: "Invalid reset token" });
+    }
+
+    // Find user and update password
+    const user = await User.findById(decoded._id);
+    if (!user || user.isDeleted) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Hash new password
+    const salt = await bcrypt.genSalt(10);
+    user.password = await bcrypt.hash(newPassword, salt);
+    await user.save();
+
+    // Clean up any forgot-password OTPs for this phone
+    otpStore.delete(`fp_${user.phone}`);
+
+    return res.status(200).json({ message: "Password reset successfully. You can now sign in." });
+  } catch (error: any) {
+    console.error("Forgot Password Reset Error:", error);
+    return res.status(500).json({ message: "Failed to reset password" });
   }
 };

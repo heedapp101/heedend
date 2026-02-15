@@ -91,6 +91,8 @@ export const getAllUsers = async (req: Request, res: Response) => {
           name: 1,
           username: 1,
           email: 1,
+          phone: 1,
+          bio: 1,
           userType: 1,
           profilePic: 1,
           isVerified: 1,
@@ -100,6 +102,28 @@ export const getAllUsers = async (req: Request, res: Response) => {
           createdAt: 1,
           interests: 1,
           location: 1,
+          // Business-specific fields
+          companyName: 1,
+          country: 1,
+          address: 1,
+          gstNumber: 1,
+          idProofType: 1,
+          idProofNumber: 1,
+          idProofUrl: 1,
+          productType: 1,
+          cashOnDeliveryAvailable: 1,
+          allIndiaDelivery: 1,
+          freeShipping: 1,
+          returnPolicy: 1,
+          requireChatBeforePurchase: 1,
+          autoReplyEnabled: 1,
+          autoReplyMessage: 1,
+          customQuickQuestion: 1,
+          inventoryAlertThreshold: 1,
+          paymentDetails: 1,
+          // General-specific fields
+          age: 1,
+          gender: 1,
           postCount: { $size: "$posts" },
           // Score Calculation
           couponScore: {
@@ -115,7 +139,13 @@ export const getAllUsers = async (req: Request, res: Response) => {
       { $sort: { [sortField]: sortOrder } },
     ]);
 
-    res.status(200).json(users);
+    // Sign private ID proof URLs for business users
+    const signedUsers = users.map((user: any) => ({
+      ...user,
+      idProofUrl: user.idProofUrl ? signPrivateUrl(user.idProofUrl) : user.idProofUrl,
+    }));
+
+    res.status(200).json(signedUsers);
   } catch (error: any) {
     res.status(500).json({ message: error.message });
   }

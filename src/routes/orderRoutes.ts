@@ -12,6 +12,7 @@ import {
   addSellerNotes,
   verifyPayment,
   getSellerStats,
+  getSellerAnalytics,
   confirmDelivery,
   autoConfirmDeliveries,
   getOrdersBetweenUsers,
@@ -25,6 +26,9 @@ router.get("/seller/orders", requireAuth, getSellerOrders);
 
 // Get seller stats
 router.get("/seller/stats", requireAuth, getSellerStats);
+
+// Get comprehensive seller analytics
+router.get("/seller/analytics", requireAuth, getSellerAnalytics);
 
 // ==================== ADMIN/CRON ROUTES ====================
 // Auto-confirm old deliveries (for cron job)

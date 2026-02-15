@@ -167,6 +167,48 @@ const sendPurchaseMessage = async (params: {
   }
 };
 
+// Helper: Send dispute-window message (auto-deletes after 24 hours)
+const sendDisputeWindowMessage = async (
+  senderId: Types.ObjectId,
+  receiverId: Types.ObjectId,
+  orderNumber: string,
+  orderId: Types.ObjectId,
+  itemName?: string
+): Promise<void> => {
+  try {
+    const chat = await getOrCreateOrderChat(senderId, receiverId);
+    if (!chat) return;
+
+    const typedChat = chat as any;
+    const orderLabel = itemName ? `"${itemName}" (Order #${orderNumber})` : `Order #${orderNumber}`;
+    const content = `⚠️ If you have any issues with ${orderLabel}, you can raise a dispute within 24 hours.`;
+
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours from now
+
+    const disputeMessage: IMessage = {
+      _id: new Types.ObjectId(),
+      chat: typedChat._id,
+      sender: senderId,
+      content,
+      messageType: "dispute",
+      disputeInfo: {
+        orderId,
+        orderNumber,
+        itemName,
+      },
+      expiresAt,
+      isRead: false,
+      createdAt: new Date(),
+    } as IMessage;
+
+    const savedMessage = await Message.create(disputeMessage);
+    // Don't update lastMessage for dispute messages to avoid clutter
+    emitOrderChatMessage(typedChat, senderId.toString(), savedMessage.toObject());
+  } catch (error) {
+    console.error("Error sending dispute window message:", error);
+  }
+};
+
 // Helper: Send order update message to chat
 const sendOrderUpdateMessage = async (
   senderId: Types.ObjectId,
@@ -1021,6 +1063,17 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
       }
     );
 
+    // Send dispute window message when order is delivered (auto-deletes after 24h)
+    if (status === "delivered") {
+      await sendDisputeWindowMessage(
+        new mongoose.Types.ObjectId(sellerId),
+        order.buyer,
+        order.orderNumber,
+        order._id,
+        itemLabel
+      );
+    }
+
     // 🔔 Send notification to buyer about order status change
     await notifyOrderStatus(
       order.buyer.toString(),
@@ -1190,6 +1243,297 @@ export const getSellerStats = async (req: AuthRequest, res: Response) => {
   } catch (error: any) {
     console.error("Get seller stats error:", error);
     res.status(500).json({ message: "Failed to fetch stats", error: error.message });
+  }
+};
+
+// ==================== SELLER ANALYTICS (COMPREHENSIVE) ====================
+
+/**
+ * Get comprehensive seller analytics
+ * GET /api/orders/seller/analytics?period=30
+ */
+export const getSellerAnalytics = async (req: AuthRequest, res: Response) => {
+  try {
+    const sellerId = req.user?._id;
+    const period = parseInt(req.query.period as string) || 30; // days
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - period);
+
+    // Previous period for comparison
+    const prevStartDate = new Date();
+    prevStartDate.setDate(prevStartDate.getDate() - period * 2);
+
+    const sellerObjId = new mongoose.Types.ObjectId(sellerId);
+
+    // ── 1. Revenue & order aggregation ──
+    const [currentPeriod] = await Order.aggregate([
+      {
+        $match: {
+          seller: sellerObjId,
+          createdAt: { $gte: startDate },
+        },
+      },
+      {
+        $facet: {
+          // Revenue from completed orders
+          revenue: [
+            {
+              $match: {
+                status: { $in: ["delivered", "shipped", "out_for_delivery"] },
+                paymentStatus: "completed",
+              },
+            },
+            {
+              $group: {
+                _id: null,
+                total: { $sum: "$totalAmount" },
+                count: { $sum: 1 },
+                avgOrderValue: { $avg: "$totalAmount" },
+              },
+            },
+          ],
+          // Total orders this period
+          totalOrders: [{ $count: "count" }],
+          // Orders by status
+          byStatus: [{ $group: { _id: "$status", count: { $sum: 1 } } }],
+          // Revenue by day (for chart)
+          revenueByDay: [
+            {
+              $match: {
+                status: { $in: ["delivered", "shipped", "out_for_delivery"] },
+                paymentStatus: "completed",
+              },
+            },
+            {
+              $group: {
+                _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+                revenue: { $sum: "$totalAmount" },
+                orders: { $sum: 1 },
+              },
+            },
+            { $sort: { _id: 1 } },
+          ],
+          // Orders by day (for chart)
+          ordersByDay: [
+            {
+              $group: {
+                _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+                count: { $sum: 1 },
+              },
+            },
+            { $sort: { _id: 1 } },
+          ],
+          // Top selling products
+          topProducts: [
+            { $unwind: "$items" },
+            {
+              $group: {
+                _id: "$items.post",
+                title: { $first: "$items.title" },
+                image: { $first: "$items.image" },
+                totalSold: { $sum: "$items.quantity" },
+                totalRevenue: { $sum: { $multiply: ["$items.price", "$items.quantity"] } },
+                orderCount: { $sum: 1 },
+              },
+            },
+            { $sort: { totalRevenue: -1 } },
+            { $limit: 5 },
+          ],
+          // Payment method breakdown
+          paymentMethods: [
+            {
+              $group: {
+                _id: "$paymentMethod",
+                count: { $sum: 1 },
+                amount: { $sum: "$totalAmount" },
+              },
+            },
+          ],
+          // Conversion funnel: pending → confirmed → shipped → delivered
+          conversionFunnel: [
+            {
+              $group: {
+                _id: "$status",
+                count: { $sum: 1 },
+              },
+            },
+          ],
+          // Recent 10 orders
+          recentOrders: [
+            { $sort: { createdAt: -1 } },
+            { $limit: 10 },
+            {
+              $lookup: {
+                from: "users",
+                localField: "buyer",
+                foreignField: "_id",
+                as: "buyerInfo",
+              },
+            },
+            { $unwind: "$buyerInfo" },
+            {
+              $project: {
+                orderNumber: 1,
+                totalAmount: 1,
+                status: 1,
+                paymentStatus: 1,
+                paymentMethod: 1,
+                createdAt: 1,
+                items: { $size: "$items" },
+                "buyerInfo.name": 1,
+                "buyerInfo.username": 1,
+                "buyerInfo.profilePic": 1,
+              },
+            },
+          ],
+        },
+      },
+    ]);
+
+    // ── 2. Previous period for comparison ──
+    const [prevPeriodData] = await Order.aggregate([
+      {
+        $match: {
+          seller: sellerObjId,
+          createdAt: { $gte: prevStartDate, $lt: startDate },
+        },
+      },
+      {
+        $facet: {
+          revenue: [
+            {
+              $match: {
+                status: { $in: ["delivered", "shipped", "out_for_delivery"] },
+                paymentStatus: "completed",
+              },
+            },
+            {
+              $group: {
+                _id: null,
+                total: { $sum: "$totalAmount" },
+                count: { $sum: 1 },
+              },
+            },
+          ],
+          totalOrders: [{ $count: "count" }],
+        },
+      },
+    ]);
+
+    // ── 3. Product engagement stats ──
+    const productStats = await ImagePost.aggregate([
+      { $match: { user: sellerObjId } },
+      {
+        $group: {
+          _id: null,
+          totalPosts: { $sum: 1 },
+          totalViews: { $sum: { $ifNull: ["$views", 0] } },
+          totalLikes: { $sum: { $ifNull: ["$likesCount", 0] } },
+          totalComments: { $sum: { $ifNull: ["$commentsCount", 0] } },
+          activePosts: {
+            $sum: {
+              $cond: [{ $eq: ["$isArchived", false] }, 1, 0],
+            },
+          },
+          outOfStock: {
+            $sum: {
+              $cond: [{ $eq: ["$isOutOfStock", true] }, 1, 0],
+            },
+          },
+          boostedPosts: {
+            $sum: {
+              $cond: [{ $eq: ["$isBoosted", true] }, 1, 0],
+            },
+          },
+        },
+      },
+    ]);
+
+    // ── 4. Low stock alerts ──
+    const lowStockPosts = await ImagePost.find({
+      user: sellerObjId,
+      isArchived: { $ne: true },
+      quantityAvailable: { $gt: 0, $lte: 5 },
+    })
+      .select("title quantityAvailable images price")
+      .sort({ quantityAvailable: 1 })
+      .limit(5)
+      .lean();
+
+    // ── Format response ──
+    const curr = currentPeriod;
+    const currRevenue = curr.revenue[0]?.total || 0;
+    const currOrders = curr.totalOrders[0]?.count || 0;
+    const prevRevenue = prevPeriodData.revenue[0]?.total || 0;
+    const prevOrders = prevPeriodData.totalOrders[0]?.count || 0;
+
+    const revenueGrowth = prevRevenue > 0 ? ((currRevenue - prevRevenue) / prevRevenue) * 100 : currRevenue > 0 ? 100 : 0;
+    const ordersGrowth = prevOrders > 0 ? ((currOrders - prevOrders) / prevOrders) * 100 : currOrders > 0 ? 100 : 0;
+
+    const statusCounts: Record<string, number> = {};
+    curr.byStatus.forEach((s: any) => {
+      statusCounts[s._id] = s.count;
+    });
+
+    const engagement = productStats[0] || {
+      totalPosts: 0,
+      totalViews: 0,
+      totalLikes: 0,
+      totalComments: 0,
+      activePosts: 0,
+      outOfStock: 0,
+      boostedPosts: 0,
+    };
+
+    res.json({
+      period,
+      overview: {
+        revenue: currRevenue,
+        revenueGrowth: Math.round(revenueGrowth * 10) / 10,
+        totalOrders: currOrders,
+        ordersGrowth: Math.round(ordersGrowth * 10) / 10,
+        completedOrders: curr.revenue[0]?.count || 0,
+        avgOrderValue: Math.round(curr.revenue[0]?.avgOrderValue || 0),
+        pendingOrders: (statusCounts["pending"] || 0) + (statusCounts["refund_requested"] || 0),
+      },
+      statusCounts,
+      charts: {
+        revenueByDay: curr.revenueByDay.map((d: any) => ({
+          date: d._id,
+          revenue: d.revenue,
+          orders: d.orders,
+        })),
+        ordersByDay: curr.ordersByDay.map((d: any) => ({
+          date: d._id,
+          orders: d.count,
+        })),
+      },
+      topProducts: curr.topProducts.map((p: any) => ({
+        id: p._id,
+        title: p.title,
+        image: p.image,
+        totalSold: p.totalSold,
+        totalRevenue: p.totalRevenue,
+        orderCount: p.orderCount,
+      })),
+      paymentMethods: curr.paymentMethods.map((p: any) => ({
+        method: p._id,
+        count: p.count,
+        amount: p.amount,
+      })),
+      engagement,
+      lowStockAlerts: lowStockPosts.map((p: any) => ({
+        id: p._id,
+        title: p.title,
+        stock: p.quantityAvailable,
+        image: p.images?.[0]?.low || p.images?.[0]?.high,
+        price: p.price,
+      })),
+      recentOrders: curr.recentOrders,
+    });
+  } catch (error: any) {
+    console.error("Get seller analytics error:", error);
+    res.status(500).json({ message: "Failed to fetch analytics", error: error.message });
   }
 };
 

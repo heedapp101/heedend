@@ -24,6 +24,7 @@ import {
   deletePost,
   archivePost,
   getMyArchivedPosts,
+  checkStock,
 } from "../controllers/imagePostController.js";
 import { requireAuth, optionalAuth } from "../middleware/authMiddleware.js";
 import { upload } from "../middleware/upload.js";
@@ -87,6 +88,9 @@ router.get("/seller/stats", requireAuth, getSellerStats);
 
 /* ---------- GET SIMILAR POSTS (More Like This) ---------- */
 router.get("/:postId/similar", getSimilarPosts);
+
+/* ---------- CHECK STOCK (Buy Now inventory check) ---------- */
+router.get("/:postId/check-stock", checkStock);
 
 /* ---------- GET SINGLE POST (ItemScreen) ---------- */
 router.get("/:id", optionalAuth, getSinglePost);

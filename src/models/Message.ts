@@ -4,7 +4,8 @@ export interface IMessage extends Document {
   chat: Types.ObjectId;
   sender: Types.ObjectId;
   content: string;
-  messageType: "text" | "image" | "product" | "inquiry" | "payment-request" | "order-update" | "delivery-confirmation";
+  messageType: "text" | "image" | "product" | "inquiry" | "payment-request" | "order-update" | "delivery-confirmation" | "dispute";
+  expiresAt?: Date;
   product?: {
     postId: Types.ObjectId;
     title: string;
@@ -37,6 +38,12 @@ export interface IMessage extends Document {
     confirmed?: boolean;
     confirmedAt?: Date;
   };
+  disputeInfo?: {
+    orderId: Types.ObjectId;
+    orderNumber: string;
+    itemName?: string;
+  };
+  expiresAt?: Date;
   isRead: boolean;
   createdAt: Date;
   updatedAt: Date;
@@ -57,6 +64,7 @@ const messageSchema = new Schema<IMessage>(
         "payment-request",
         "order-update",
         "delivery-confirmation",
+        "dispute",
       ],
       default: "text",
     },
@@ -96,6 +104,12 @@ const messageSchema = new Schema<IMessage>(
       confirmed: { type: Boolean, default: false },
       confirmedAt: Date,
     },
+    disputeInfo: {
+      orderId: { type: Schema.Types.ObjectId, ref: "Order" },
+      orderNumber: String,
+      itemName: String,
+    },
+    expiresAt: { type: Date, default: null },
     isRead: { type: Boolean, default: false },
   },
   { timestamps: true }
@@ -103,6 +117,8 @@ const messageSchema = new Schema<IMessage>(
 
 messageSchema.index({ chat: 1, createdAt: -1 });
 messageSchema.index({ chat: 1, sender: 1, isRead: 1 });
+// TTL index: auto-delete messages when expiresAt is reached
+messageSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0, sparse: true });
 messageSchema.index({ chat: 1, messageType: 1 });
 
 export const Message = model<IMessage>("Message", messageSchema);

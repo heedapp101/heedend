@@ -20,7 +20,7 @@ export interface IMessage {
   _id?: Types.ObjectId;
   sender: Types.ObjectId;
   content: string;
-  messageType: "text" | "image" | "product" | "inquiry" | "payment-request" | "order-update" | "delivery-confirmation";
+  messageType: "text" | "image" | "product" | "inquiry" | "payment-request" | "order-update" | "delivery-confirmation" | "dispute";
   // For product sharing (standalone product message)
   product?: {
     postId: Types.ObjectId;
@@ -115,7 +115,7 @@ const messageSchema = new Schema<IMessage>(
     content: { type: String, required: true },
     messageType: {
       type: String,
-      enum: ["text", "image", "product", "inquiry", "payment-request", "order-update", "delivery-confirmation"],
+      enum: ["text", "image", "product", "inquiry", "payment-request", "order-update", "delivery-confirmation", "dispute"],
       default: "text",
     },
     product: {

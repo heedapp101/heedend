@@ -17,7 +17,7 @@ import { interestBuffer } from "../utils/InterestBuffer.js";
 import { notifyLike } from "../utils/notificationService.js";
 
 // Tag generation now happens asynchronously via queue system
-// No blocklist needed - Gemini is prompted for specific fashion terms
+// Gemini identifies the product category first, then generates relevant tags
 
 const parseBooleanInput = (value: unknown): boolean | undefined => {
   if (value === undefined || value === null || value === "") return undefined;
@@ -409,9 +409,26 @@ export const getSinglePost = async (req: AuthRequest, res: Response) => {
 /* =========================
    TOGGLE LIKE
 ========================= */
+// In-memory rate limit: 1 like toggle per user per post per second
+const likeRateMap = new Map<string, number>();
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, timestamp] of likeRateMap) {
+    if (now - timestamp > 5000) likeRateMap.delete(key);
+  }
+}, 30000); // Clean up every 30s
+
 export const toggleLikePost = async (req: AuthRequest, res: Response) => {
   try {
     if (!req.user) return res.status(401).json({ message: "Unauthorized" });
+
+    // Rate limit: 1 toggle per user per post per second
+    const rateKey = `${req.user._id}_${req.params.postId}`;
+    const lastToggle = likeRateMap.get(rateKey);
+    if (lastToggle && Date.now() - lastToggle < 1000) {
+      return res.status(429).json({ message: "Too fast, please wait a moment" });
+    }
+    likeRateMap.set(rateKey, Date.now());
 
     const post = await ImagePost.findById(req.params.postId);
     if (!post) return res.status(404).json({ message: "Post not found" });
@@ -2235,5 +2252,58 @@ export const getMyArchivedPosts = async (req: AuthRequest, res: Response) => {
     res.json(formatted);
   } catch (err) {
     res.status(500).json({ message: "Failed to fetch archived posts" });
+  }
+};
+
+/* =========================
+   CHECK STOCK (Lightweight stock check for Buy Now)
+========================= */
+export const checkStock = async (req: Request, res: Response) => {
+  try {
+    const { postId } = req.params;
+    const { selectedSize, quantity } = req.query;
+    const requestedQty = parseInt(quantity as string) || 1;
+
+    const post = await ImagePost.findById(postId).select(
+      "quantityAvailable isOutOfStock sizeVariants title"
+    );
+    if (!post) {
+      return res.status(404).json({ message: "Product not found", inStock: false });
+    }
+
+    const hasSizeVariants = Array.isArray((post as any).sizeVariants) && (post as any).sizeVariants.length > 0;
+    const hasManagedInventory = typeof (post as any).quantityAvailable === "number";
+
+    if (hasSizeVariants && selectedSize) {
+      const variant = (post as any).sizeVariants.find((v: any) => v.size === selectedSize);
+      if (!variant || variant.quantity <= 0) {
+        return res.json({ inStock: false, message: `"${selectedSize}" is out of stock` });
+      }
+      if (requestedQty > variant.quantity) {
+        return res.json({ inStock: false, message: `Only ${variant.quantity} available in size "${selectedSize}"` });
+      }
+      return res.json({ inStock: true, available: variant.quantity });
+    }
+
+    if (hasSizeVariants && !selectedSize) {
+      const allOutOfStock = (post as any).sizeVariants.every((v: any) => v.quantity <= 0);
+      if (allOutOfStock) {
+        return res.json({ inStock: false, message: "All sizes are out of stock" });
+      }
+      return res.json({ inStock: true });
+    }
+
+    if ((post as any).isOutOfStock || (hasManagedInventory && (post as any).quantityAvailable <= 0)) {
+      return res.json({ inStock: false, message: "This product is out of stock" });
+    }
+
+    if (hasManagedInventory && requestedQty > (post as any).quantityAvailable) {
+      return res.json({ inStock: false, message: `Only ${(post as any).quantityAvailable} available` });
+    }
+
+    return res.json({ inStock: true, available: (post as any).quantityAvailable });
+  } catch (err) {
+    console.error("Check stock error:", err);
+    res.status(500).json({ message: "Failed to check stock", inStock: false });
   }
 };
