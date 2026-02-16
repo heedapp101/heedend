@@ -361,18 +361,24 @@ export const sendMessage = async (req: AuthRequest, res: Response) => {
           typeof rawProduct.selectedSize === "string" && rawProduct.selectedSize.trim().length > 0
             ? rawProduct.selectedSize.trim()
             : undefined,
+        sizeOptions: Array.isArray(rawProduct.sizeOptions)
+          ? rawProduct.sizeOptions
+              .map((size: any) => String(size || "").trim())
+              .filter((size: string) => size.length > 0)
+          : [],
       };
     };
 
     const isInquiryMessage = messageType === "inquiry";
     const shouldIncludeProduct = messageType === "product" || isInquiryMessage;
-    const hasSizeVariants =
-      typeof product?.hasSizeVariants === "boolean"
-        ? product.hasSizeVariants
-        : String(product?.hasSizeVariants).toLowerCase() === "true";
+    const incomingSizeOptions = Array.isArray(product?.sizeOptions)
+      ? product.sizeOptions
+          .map((size: any) => String(size || "").trim())
+          .filter((size: string) => size.length > 0)
+      : [];
     const hasSelectedSize =
       typeof product?.selectedSize === "string" && product.selectedSize.trim().length > 0;
-    const shouldPromptSelectSize = isInquiryMessage && hasSizeVariants && !hasSelectedSize;
+    const shouldPromptSelectSize = isInquiryMessage && incomingSizeOptions.length > 0 && !hasSelectedSize;
     const normalizedProduct = shouldIncludeProduct ? normalizeProduct(product) : undefined;
 
     if (shouldIncludeProduct && !normalizedProduct) {
@@ -493,7 +499,7 @@ export const sendMessage = async (req: AuthRequest, res: Response) => {
 
           if (!existingAutoProductReply) {
             if (shouldPromptSelectSize) {
-              const sizePromptText = "Please select a size first.";
+              const sizePromptText = "Choose a size from the buttons below to continue.";
               const sizePromptMessage: IMessage = {
                 chat: chat._id,
                 sender: new Types.ObjectId(businessRecipient._id),
@@ -514,7 +520,7 @@ export const sendMessage = async (req: AuthRequest, res: Response) => {
             }
 
             const autoReplyCtaText = shouldPromptSelectSize
-              ? "Select size, then tap Buy Now or Negotiate below."
+              ? "Choose size, then tap Buy Now or Negotiate below."
               : "Tap Buy Now or Negotiate below.";
             const autoReplyMessage: IMessage = {
               chat: chat._id,
@@ -909,3 +915,4 @@ export const sendOfferPrice = async (req: AuthRequest, res: Response) => {
     return res.status(500).json({ message: "Server error" });
   }
 };
+
