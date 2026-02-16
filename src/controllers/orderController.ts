@@ -16,7 +16,7 @@ interface AuthRequest extends Request {
   user?: { _id: Types.ObjectId; username?: string };
 }
 
-// Generate unique order number: HEED-YYYYMMDD-XXXXX
+// Generate unique order number: HEESZO-YYYYMMDD-XXXXX
 // Uses atomic counter to avoid race conditions
 const generateOrderNumber = async (): Promise<string> => {
   const today = new Date();
@@ -29,7 +29,7 @@ const generateOrderNumber = async (): Promise<string> => {
   );
 
   const sequenceNum = String(counter.seq).padStart(5, '0');
-  return `HEED-${dateStr}-${sequenceNum}`;
+  return `HEESZO-${dateStr}-${sequenceNum}`;
 };
 
 // Status labels for user-friendly messages

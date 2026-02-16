@@ -56,7 +56,7 @@ export const sendSMS = async (to: string, body: string): Promise<boolean> => {
  * Send OTP via SMS
  */
 export const sendOtpSMS = async (phone: string, otp: string): Promise<boolean> => {
-  const message = `Your Heed verification code is: ${otp}. Valid for 5 minutes. Do not share this code.`;
+  const message = `Your Heeszo verification code is: ${otp}. Valid for 5 minutes. Do not share this code.`;
   return sendSMS(phone, message);
 };
 

@@ -23,6 +23,7 @@ interface MessagePayload {
     title: string;
     price: number;
     image: string;
+    selectedSize?: string;
   };
   // For starting a new inquiry
   startInquiry?: boolean;
@@ -168,6 +169,10 @@ export async function initializeSocket(server: HttpServer) {
               title: product.title || "",
               price: product.price || 0,
               image: product.image || "",
+              selectedSize:
+                typeof product.selectedSize === "string" && product.selectedSize.trim().length > 0
+                  ? product.selectedSize.trim()
+                  : undefined,
             },
             status: "active" as const,
             createdAt: new Date(),
@@ -207,6 +212,10 @@ export async function initializeSocket(server: HttpServer) {
             title: product.title || "",
             price: product.price || 0,
             image: product.image || "",
+            selectedSize:
+              typeof product.selectedSize === "string" && product.selectedSize.trim().length > 0
+                ? product.selectedSize.trim()
+                : undefined,
           } : undefined,
           inquiryId: finalInquiryId,
           replyTo: replyTo ? {
@@ -327,6 +336,10 @@ export async function initializeSocket(server: HttpServer) {
                   title: product.title || "",
                   price: Number(product.price || 0),
                   image: product.image || "",
+                  selectedSize:
+                    typeof product.selectedSize === "string" && product.selectedSize.trim().length > 0
+                      ? product.selectedSize.trim()
+                      : undefined,
                 };
               }
 
@@ -340,6 +353,10 @@ export async function initializeSocket(server: HttpServer) {
                     title: linkedInquiry.product.title || "",
                     price: linkedInquiry.product.price || 0,
                     image: linkedInquiry.product.image || "",
+                    selectedSize:
+                      typeof linkedInquiry.product.selectedSize === "string" && linkedInquiry.product.selectedSize.trim().length > 0
+                        ? linkedInquiry.product.selectedSize.trim()
+                        : undefined,
                   };
                 }
               }

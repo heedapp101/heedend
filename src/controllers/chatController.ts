@@ -357,6 +357,10 @@ export const sendMessage = async (req: AuthRequest, res: Response) => {
         title: rawProduct.title || "",
         price: Number(rawProduct.price || 0),
         image: rawProduct.image || "",
+        selectedSize:
+          typeof rawProduct.selectedSize === "string" && rawProduct.selectedSize.trim().length > 0
+            ? rawProduct.selectedSize.trim()
+            : undefined,
       };
     };
 
@@ -819,6 +823,10 @@ export const sendOfferPrice = async (req: AuthRequest, res: Response) => {
       title: product.title,
       price: normalizedOfferPrice,
       image: product.image || "",
+      selectedSize:
+        typeof product.selectedSize === "string" && product.selectedSize.trim().length > 0
+          ? product.selectedSize.trim()
+          : undefined,
     };
 
     // Create offer message
@@ -871,5 +879,4 @@ export const sendOfferPrice = async (req: AuthRequest, res: Response) => {
     return res.status(500).json({ message: "Server error" });
   }
 };
-
 

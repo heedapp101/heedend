@@ -11,6 +11,7 @@ export interface IMessage extends Document {
     title: string;
     price: number;
     image: string;
+    selectedSize?: string;
   };
   inquiryId?: Types.ObjectId;
   replyTo?: {
@@ -72,6 +73,7 @@ const messageSchema = new Schema<IMessage>(
       title: String,
       price: Number,
       image: String,
+      selectedSize: { type: String, trim: true },
     },
     inquiryId: { type: Schema.Types.ObjectId },
     replyTo: {

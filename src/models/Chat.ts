@@ -8,6 +8,7 @@ export interface IInquiry {
     title: string;
     price: number;
     image: string;
+    selectedSize?: string;
   };
   status: "active" | "replied" | "closed";
   createdAt: Date;
@@ -27,6 +28,7 @@ export interface IMessage {
     title: string;
     price: number;
     image: string;
+    selectedSize?: string;
   };
   // Link message to an inquiry (for grouping)
   inquiryId?: Types.ObjectId;
@@ -76,6 +78,7 @@ export interface IChat extends Document {
     title: string;
     price: number;
     image: string;
+    selectedSize?: string;
   };
   messages: IMessage[];
   lastMessage?: {
@@ -96,6 +99,7 @@ const inquirySchema = new Schema<IInquiry>(
       title: { type: String, required: true },
       price: { type: Number, required: true },
       image: { type: String, required: true },
+      selectedSize: { type: String, trim: true },
     },
     status: {
       type: String,
@@ -123,6 +127,7 @@ const messageSchema = new Schema<IMessage>(
       title: String,
       price: Number,
       image: String,
+      selectedSize: { type: String, trim: true },
     },
     // Link message to an inquiry
     inquiryId: { type: Schema.Types.ObjectId },
@@ -181,6 +186,7 @@ const chatSchema = new Schema<IChat>(
       title: String,
       price: Number,
       image: String,
+      selectedSize: { type: String, trim: true },
     },
     // Legacy embedded messages (deprecated). Kept for migration only.
     // New messages are stored in the Message collection.
