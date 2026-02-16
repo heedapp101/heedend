@@ -24,6 +24,7 @@ interface MessagePayload {
     price: number;
     image: string;
     selectedSize?: string;
+    hasSizeVariants?: boolean;
   };
   // For starting a new inquiry
   startInquiry?: boolean;
@@ -296,6 +297,13 @@ export async function initializeSocket(server: HttpServer) {
           if (businessRecipient) {
             const isInquiryMessage = messageType === "inquiry" || startInquiry;
             const autoReplyInquiryId = finalInquiryId || chat.activeInquiryId;
+            const hasSizeVariants =
+              typeof product?.hasSizeVariants === "boolean"
+                ? product.hasSizeVariants
+                : String(product?.hasSizeVariants).toLowerCase() === "true";
+            const hasSelectedSize =
+              typeof product?.selectedSize === "string" && product.selectedSize.trim().length > 0;
+            const shouldPromptSelectSize = isInquiryMessage && hasSizeVariants && !hasSelectedSize;
             console.log("[AUTO-REPLY DEBUG] isInquiryMessage:", isInquiryMessage, "autoReplyInquiryId:", autoReplyInquiryId, "negotiate:", negotiate);
 
             // When user presses "Negotiate" button, always auto-reply
@@ -340,6 +348,7 @@ export async function initializeSocket(server: HttpServer) {
                     typeof product.selectedSize === "string" && product.selectedSize.trim().length > 0
                       ? product.selectedSize.trim()
                       : undefined,
+                  hasSizeVariants,
                 };
               }
 
@@ -380,8 +389,36 @@ export async function initializeSocket(server: HttpServer) {
               console.log("[AUTO-REPLY DEBUG] existingAutoProductReply:", !!existingAutoProductReply);
 
               if (!existingAutoProductReply) {
-                console.log("[AUTO-REPLY DEBUG] ✅ Sending product CTA auto-reply!");
-                const autoReplyCtaText = "📦 Product details";
+                if (shouldPromptSelectSize) {
+                  const sizePromptText = "Please select a size first.";
+                  const sizePromptMessage = {
+                    _id: new Types.ObjectId(),
+                    chat: chat._id,
+                    sender: new Types.ObjectId(businessRecipient._id),
+                    content: sizePromptText,
+                    messageType: "text" as const,
+                    inquiryId: autoReplyInquiryId,
+                    isRead: false,
+                    createdAt: new Date(),
+                  };
+
+                  const savedSizePrompt = await Message.create(sizePromptMessage);
+                  io.to(chatId).emit("new-message", {
+                    chatId,
+                    message: {
+                      ...savedSizePrompt.toObject(),
+                      sender: {
+                        _id: businessRecipient._id.toString(),
+                      },
+                    },
+                    activeInquiry: activeInquiry || null,
+                  });
+                }
+
+                console.log("[AUTO-REPLY DEBUG] Sending product CTA auto-reply");
+                const autoReplyCtaText = shouldPromptSelectSize
+                  ? "Select size, then tap Buy Now or Negotiate below."
+                  : "Tap Buy Now or Negotiate below.";
                 const autoReplyMessage = {
                   _id: new Types.ObjectId(),
                   chat: chat._id,
@@ -549,3 +586,4 @@ export function getIO() {
 export async function isUserOnline(userId: string): Promise<boolean> {
   return isUserOnlineStore(userId);
 }
+

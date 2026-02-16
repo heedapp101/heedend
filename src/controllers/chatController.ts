@@ -366,6 +366,13 @@ export const sendMessage = async (req: AuthRequest, res: Response) => {
 
     const isInquiryMessage = messageType === "inquiry";
     const shouldIncludeProduct = messageType === "product" || isInquiryMessage;
+    const hasSizeVariants =
+      typeof product?.hasSizeVariants === "boolean"
+        ? product.hasSizeVariants
+        : String(product?.hasSizeVariants).toLowerCase() === "true";
+    const hasSelectedSize =
+      typeof product?.selectedSize === "string" && product.selectedSize.trim().length > 0;
+    const shouldPromptSelectSize = isInquiryMessage && hasSizeVariants && !hasSelectedSize;
     const normalizedProduct = shouldIncludeProduct ? normalizeProduct(product) : undefined;
 
     if (shouldIncludeProduct && !normalizedProduct) {
@@ -485,7 +492,30 @@ export const sendMessage = async (req: AuthRequest, res: Response) => {
             .lean();
 
           if (!existingAutoProductReply) {
-            const autoReplyCtaText = "Tap Buy Now or Negotiate below.";
+            if (shouldPromptSelectSize) {
+              const sizePromptText = "Please select a size first.";
+              const sizePromptMessage: IMessage = {
+                chat: chat._id,
+                sender: new Types.ObjectId(businessRecipient._id),
+                content: sizePromptText,
+                messageType: "text",
+                inquiryId: autoReplyInquiryId,
+                isRead: false,
+                createdAt: new Date(),
+              } as IMessage;
+
+              const savedSizePrompt = await Message.create(sizePromptMessage);
+              emitRealtimeChatEvent(
+                chat,
+                businessRecipient._id.toString(),
+                savedSizePrompt.toObject(),
+                activeInquiry
+              );
+            }
+
+            const autoReplyCtaText = shouldPromptSelectSize
+              ? "Select size, then tap Buy Now or Negotiate below."
+              : "Tap Buy Now or Negotiate below.";
             const autoReplyMessage: IMessage = {
               chat: chat._id,
               sender: new Types.ObjectId(businessRecipient._id),
@@ -879,4 +909,3 @@ export const sendOfferPrice = async (req: AuthRequest, res: Response) => {
     return res.status(500).json({ message: "Server error" });
   }
 };
-

@@ -109,20 +109,22 @@ app.use(helmet({
   crossOriginResourcePolicy: { policy: "cross-origin" }, // Allow images to load
 }));
 
-// ✅ SECURITY: Rate limiting - Global
+const isDev = process.env.NODE_ENV !== 'production';
+
+// ✅ SECURITY: Rate limiting - Global (std: 200/15min)
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 1000, // 1000 requests per 15 minutes
+  max: isDev ? 1000 : 200, // Relaxed in dev, standard in production
   message: { message: "Too many requests, please try again later." },
   standardHeaders: true,
   legacyHeaders: false,
 });
 app.use(globalLimiter);
 
-// ✅ SECURITY: Strict rate limit for auth routes
+// ✅ SECURITY: Strict rate limit for auth routes (std: 5-10/15min)
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 20, // Only 20 auth attempts per 15 minutes
+  max: isDev ? 100 : 10, // 100 in dev for testing, 10 in production
   message: { message: "Too many login attempts, please try again later." },
   standardHeaders: true,
   legacyHeaders: false,
@@ -131,7 +133,7 @@ const authLimiter = rateLimit({
 // ✅ SECURITY: Strict rate limit for sensitive operations (orders, payments)
 const sensitiveLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 50, // 50 requests per 15 minutes for orders/payments
+  max: isDev ? 200 : 30, // Relaxed in dev, strict in production
   message: { message: "Too many requests, please try again later." },
   standardHeaders: true,
   legacyHeaders: false,
