@@ -123,6 +123,10 @@ messageSchema.index({ chat: 1, sender: 1, isRead: 1 });
 // TTL index: auto-delete messages when expiresAt is reached
 messageSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0, sparse: true });
 messageSchema.index({ chat: 1, messageType: 1 });
+// Supports auto-reply lookup by chat/sender/type/inquiry with latest-first sort
+messageSchema.index({ chat: 1, sender: 1, messageType: 1, inquiryId: 1, createdAt: -1 });
+// Supports duplicate auto-reply cooldown check by chat/sender/content with latest-first sort
+messageSchema.index({ chat: 1, sender: 1, content: 1, createdAt: -1 });
 
 export const Message = model<IMessage>("Message", messageSchema);
 
