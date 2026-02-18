@@ -4,11 +4,14 @@ export type NotificationType =
   | "like"
   | "comment"
   | "follow"
+  | "award"
   | "order_placed"
   | "order_confirmed"
   | "order_shipped"
   | "order_delivered"
   | "order_cancelled"
+  | "chat"
+  | "message"
   | "mention"
   | "system";
 
@@ -53,11 +56,14 @@ const notificationSchema = new Schema<INotification>(
         "like", 
         "comment", 
         "follow", 
+        "award",
         "order_placed", 
         "order_confirmed", 
         "order_shipped", 
         "order_delivered", 
         "order_cancelled",
+        "chat",
+        "message",
         "mention",
         "system"
       ],

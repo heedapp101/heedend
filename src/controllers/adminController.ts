@@ -79,6 +79,43 @@ const parseAwardPaymentInput = (
     },
   };
 };
+
+const createAwardNotification = async ({
+  recipientId,
+  senderId,
+  title,
+  message,
+  awardId,
+  amount,
+  needsPaymentMethod,
+  postId,
+}: {
+  recipientId: any;
+  senderId: any;
+  title: string;
+  message: string;
+  awardId: any;
+  amount: number;
+  needsPaymentMethod: boolean;
+  postId?: any;
+}) => {
+  await Notification.create({
+    recipient: recipientId,
+    sender: senderId,
+    type: "award",
+    title,
+    message,
+    ...(postId ? { post: postId } : {}),
+    metadata: {
+      awardId: String(awardId),
+      amount,
+      needsPaymentMethod,
+      ...(postId ? { postId: String(postId) } : {}),
+      action: needsPaymentMethod ? "add_award_payment" : "view_award",
+    },
+  });
+};
+
 export const getPendingApprovals = async (req: Request, res: Response) => {
   try {
     const pendingUsers = await User.find({ 
@@ -1216,18 +1253,19 @@ export const awardPost = async (req: Request, res: Response) => {
 
     // Send notification to user
     if (sendNotification !== false) {
-      await Notification.create({
-        recipient: targetUser._id,
-        sender: adminId,
-        type: "award",
-        title: "🏆 Congratulations! Your post has been awarded!",
-        message: post.awardMessage + (amount > 0 ? ` You'll receive ₹${amount}!` : ""),
-      data: {
-        postId: post._id,
+      const awardMessage = hasPaymentMethod
+        ? `${post.awardMessage}${post.awardAmount > 0 ? ` You'll receive Rs ${post.awardAmount}.` : ""}`
+        : `${post.awardMessage} Add Google Pay UPI ID or phone number to receive this award.`;
+
+      await createAwardNotification({
+        recipientId: targetUser._id,
+        senderId: adminId,
+        title: "Your post has been awarded",
+        message: awardMessage,
         awardId: award._id,
-        amount: post.awardAmount,
+        amount: post.awardAmount || 0,
         needsPaymentMethod: !hasPaymentMethod,
-        },
+        postId: post._id,
       });
     }
 
@@ -1315,17 +1353,18 @@ export const awardUser = async (req: Request, res: Response) => {
 
     // Send notification
     if (sendNotification !== false) {
-      await Notification.create({
-        recipient: user._id,
-        sender: adminId,
-        type: "award",
-        title: "🏆 Congratulations! You've been awarded!",
-        message: user.userAwardMessage + (amount > 0 ? ` You'll receive ₹${amount}!` : ""),
-        data: {
-          awardId: award._id,
-          amount: user.userAwardAmount,
-          needsPaymentMethod: !hasPaymentMethod,
-        },
+      const awardMessage = hasPaymentMethod
+        ? `${user.userAwardMessage}${user.userAwardAmount > 0 ? ` You'll receive Rs ${user.userAwardAmount}.` : ""}`
+        : `${user.userAwardMessage} Add Google Pay UPI ID or phone number to receive this award.`;
+
+      await createAwardNotification({
+        recipientId: user._id,
+        senderId: adminId,
+        title: "You have been awarded",
+        message: awardMessage,
+        awardId: award._id,
+        amount: user.userAwardAmount || 0,
+        needsPaymentMethod: !hasPaymentMethod,
       });
     }
 
@@ -1398,11 +1437,34 @@ export const updateAward = async (req: Request, res: Response) => {
       return res.status(404).json({ message: "Award not found" });
     }
 
-    if (status) {
-      award.status = status;
-      if (status === "paid") {
-        award.paidAt = new Date();
+    const previousStatus = award.status;
+    const requestedStatus = typeof status === "string" ? String(status) : undefined;
+    const hasRequestedStatus = typeof requestedStatus === "string";
+    const validStatuses = ["pending", "approved", "paid", "rejected"];
+
+    if (hasRequestedStatus && !validStatuses.includes(requestedStatus)) {
+      return res.status(400).json({ message: "Invalid award status" });
+    }
+
+    if (hasRequestedStatus) {
+      award.status = requestedStatus as "pending" | "approved" | "paid" | "rejected";
+    }
+
+    if (award.status === "paid") {
+      if (!award.paymentMethod?.type || !award.paymentMethod?.value) {
+        const recipient = await User.findById(award.targetUser).select("awardPaymentMethod");
+        const recipientMethod = (recipient as any)?.awardPaymentMethod;
+        if (!recipientMethod?.type || !recipientMethod?.value) {
+          return res.status(400).json({
+            message: "User has not added a payment method yet",
+          });
+        }
+        award.paymentMethod = {
+          type: recipientMethod.type,
+          value: recipientMethod.value,
+        } as any;
       }
+      award.paidAt = new Date();
     }
 
     if (typeof showInFeed === "boolean") {
@@ -1426,13 +1488,30 @@ export const updateAward = async (req: Request, res: Response) => {
         awardShowInFeed: award.showInFeed,
         awardPriority: award.priority,
         awardAmount: award.amount,
-        ...(status === "paid" ? { awardPaidAt: new Date() } : {}),
+        ...(award.status === "paid" ? { awardPaidAt: new Date() } : {}),
       });
     } else if (award.type === "user") {
       await User.findByIdAndUpdate(award.targetUser, {
         userAwardStatus: award.status,
         userAwardShowInFeed: award.showInFeed,
         userAwardAmount: award.amount,
+      });
+    }
+
+    if (previousStatus !== "paid" && award.status === "paid") {
+      const paidMessage =
+        award.amount > 0
+          ? `Congratulations! You received Rs ${award.amount}.`
+          : "Congratulations! Your award has been completed.";
+      await createAwardNotification({
+        recipientId: award.targetUser,
+        senderId: (req as any).user._id,
+        title: "Award payment completed",
+        message: paidMessage,
+        awardId: award._id,
+        amount: award.amount || 0,
+        needsPaymentMethod: false,
+        ...(award.type === "post" && award.targetPost ? { postId: award.targetPost } : {}),
       });
     }
 
@@ -1494,6 +1573,7 @@ export const getAwardedContent = async (req: Request, res: Response) => {
     // Get awarded posts that are visible
     const awardedPosts = await ImagePost.find({
       isAwarded: true,
+      awardStatus: "paid",
       awardShowInFeed: true,
       awardHidden: { $ne: true },
       adminHidden: { $ne: true },
@@ -1508,6 +1588,7 @@ export const getAwardedContent = async (req: Request, res: Response) => {
     // Get awarded users that are visible
     const awardedUsers = await User.find({
       isAwarded: true,
+      userAwardStatus: "paid",
       userAwardShowInFeed: true,
       isDeleted: { $ne: true },
     })
@@ -1518,6 +1599,7 @@ export const getAwardedContent = async (req: Request, res: Response) => {
 
     const totalAwardedPosts = await ImagePost.countDocuments({
       isAwarded: true,
+      awardStatus: "paid",
       awardShowInFeed: true,
       awardHidden: { $ne: true },
       adminHidden: { $ne: true },
@@ -1526,6 +1608,7 @@ export const getAwardedContent = async (req: Request, res: Response) => {
 
     const totalAwardedUsers = await User.countDocuments({
       isAwarded: true,
+      userAwardStatus: "paid",
       userAwardShowInFeed: true,
       isDeleted: { $ne: true },
     });

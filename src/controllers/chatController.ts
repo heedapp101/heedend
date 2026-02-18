@@ -269,6 +269,8 @@ export const getUserChats = async (req: AuthRequest, res: Response) => {
     if (type && ["general", "business", "admin"].includes(type as string)) {
       if (type === "business" && req.user?.userType === "business") {
         query.chatType = { $in: ["business", "admin"] };
+      } else if (type === "general" && req.user?.userType !== "admin") {
+        query.chatType = { $in: ["general", "admin"] };
       } else {
         query.chatType = type;
       }

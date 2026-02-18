@@ -18,6 +18,7 @@ import Message from "../models/Message.js";
 import Order from "../models/Order.js";
 import Report from "../models/Report.js";
 import RecommendationAnalytics from "../models/RecommendationAnalytics.js";
+import { Award } from "../models/Award.js";
 import { deleteFiles } from "../utils/cloudflareR2.js";
 
 const hasPaymentDetails = (details?: Record<string, any>): boolean => {
@@ -728,17 +729,65 @@ export const updateAwardPaymentMethod = async (req: AuthRequest, res: Response) 
       return res.status(404).json({ message: "User not found" });
     }
 
-    (user as any).awardPaymentMethod = {
+    const normalizedValue = type === "phone" ? trimmedValue.replace(/\D/g, "") : trimmedValue;
+    const normalizedMethod = {
       type,
-      value: trimmedValue,
+      value: normalizedValue,
     };
 
+    (user as any).awardPaymentMethod = normalizedMethod;
+
     await user.save();
+    await User.updateOne(
+      { _id: user._id, userAwardStatus: "pending" },
+      { userAwardStatus: "approved" }
+    );
+
+    const pendingAwards = await Award.find({
+      targetUser: user._id,
+      status: "pending",
+    })
+      .select("_id type targetPost")
+      .lean();
+
+    if (pendingAwards.length > 0) {
+      const pendingAwardIds = pendingAwards.map((award: any) => award._id);
+      const pendingPostIds = pendingAwards
+        .filter((award: any) => award.type === "post" && award.targetPost)
+        .map((award: any) => award.targetPost);
+
+      await Award.updateMany(
+        { _id: { $in: pendingAwardIds } },
+        {
+          status: "approved",
+          paymentMethod: normalizedMethod,
+        }
+      );
+
+      if (pendingPostIds.length > 0) {
+        await ImagePost.updateMany(
+          { _id: { $in: pendingPostIds }, awardStatus: "pending" },
+          { awardStatus: "approved" }
+        );
+      }
+
+      await Notification.create({
+        recipient: user._id,
+        type: "award",
+        title: "Payment method submitted",
+        message: "Your payment method was submitted. Admin can now process your award payment.",
+        metadata: {
+          action: "award_payment_method_submitted",
+          needsPaymentMethod: false,
+        },
+      });
+    }
 
     res.json({
       message: "Award payment method updated",
       awardPaymentMethod: (user as any).awardPaymentMethod,
       hasPaymentMethod: true,
+      pendingAwardsApproved: pendingAwards.length,
     });
   } catch (err: any) {
     console.error("Update award payment method error:", err);
