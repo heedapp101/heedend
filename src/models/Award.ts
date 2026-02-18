@@ -15,6 +15,11 @@ export interface IAward extends Document {
     type: "upi" | "phone";
     value: string;
   };
+  paymentProof?: {
+    transactionId?: string;
+    screenshotUrl?: string;
+    addedAt?: Date;
+  };
   createdAt: Date;
   updatedAt: Date;
 }
@@ -94,6 +99,11 @@ const awardSchema = new Schema<IAward>(
         enum: ["upi", "phone"],
       },
       value: String,
+    },
+    paymentProof: {
+      transactionId: { type: String, trim: true },
+      screenshotUrl: { type: String, trim: true },
+      addedAt: Date,
     },
   },
   { timestamps: true }

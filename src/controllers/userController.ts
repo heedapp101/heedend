@@ -20,6 +20,7 @@ import Report from "../models/Report.js";
 import RecommendationAnalytics from "../models/RecommendationAnalytics.js";
 import { Award } from "../models/Award.js";
 import { deleteFiles } from "../utils/cloudflareR2.js";
+import { sendAwardChatMessage } from "../utils/awardChat.js";
 
 const hasPaymentDetails = (details?: Record<string, any>): boolean => {
   if (!details) return false;
@@ -747,7 +748,7 @@ export const updateAwardPaymentMethod = async (req: AuthRequest, res: Response) 
       targetUser: user._id,
       status: "pending",
     })
-      .select("_id type targetPost")
+      .select("_id type targetPost awardedBy")
       .lean();
 
     if (pendingAwards.length > 0) {
@@ -781,6 +782,25 @@ export const updateAwardPaymentMethod = async (req: AuthRequest, res: Response) 
           needsPaymentMethod: false,
         },
       });
+
+      const adminIds = Array.from(
+        new Set(
+          pendingAwards
+            .map((award: any) => String(award.awardedBy || "").trim())
+            .filter((id: string) => id.length > 0)
+        )
+      );
+
+      await Promise.all(
+        adminIds.map((adminId) =>
+          sendAwardChatMessage({
+            adminId,
+            userId: user._id,
+            senderId: user._id,
+            content: "I have updated my payment details for the award. Please verify and complete the payment.",
+          })
+        )
+      );
     }
 
     res.json({

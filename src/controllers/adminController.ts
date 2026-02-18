@@ -6,6 +6,7 @@ import Report from "../models/Report.js";
 import UserReport from "../models/UserReport.js";
 import { Award } from "../models/Award.js";
 import Notification from "../models/Notification.js";
+import { sendAwardChatMessage } from "../utils/awardChat.js";
 import crypto from "crypto";
 const signPrivateUrl = (url: string) => {
   // Only sign if it's a private URL
@@ -1207,6 +1208,18 @@ export const awardPost = async (req: Request, res: Response) => {
       return res.status(404).json({ message: "Post owner not found" });
     }
 
+    const existingActiveAward = await Award.findOne({
+      targetUser: targetUser._id,
+      status: { $in: ["pending", "approved", "paid"] },
+    })
+      .select("_id status")
+      .lean();
+    if (existingActiveAward) {
+      return res.status(400).json({
+        message: "This user already has an active award. Complete or reject it before creating another payment.",
+      });
+    }
+
     const paymentInput = parseAwardPaymentInput(paymentMethodType, paymentMethodValue);
     if (paymentInput.error) {
       return res.status(400).json({ message: paymentInput.error });
@@ -1276,6 +1289,15 @@ export const awardPost = async (req: Request, res: Response) => {
       });
     }
 
+    await sendAwardChatMessage({
+      adminId,
+      userId: targetUser._id,
+      senderId: adminId,
+      content: shouldWaitForPaymentMethod
+        ? `Award update: Your post "${post.title || "Post"}" was awarded${post.awardAmount > 0 ? ` for Rs ${post.awardAmount}` : ""}. Please add or update your payment details so we can send money.`
+        : `Award update: Your post "${post.title || "Post"}" was awarded${post.awardAmount > 0 ? ` for Rs ${post.awardAmount}` : ""}. Payment will be processed by admin.`,
+    });
+
     res.status(200).json({
       success: true,
       message: "Post awarded successfully",
@@ -1320,6 +1342,18 @@ export const awardUser = async (req: Request, res: Response) => {
     const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({ message: "User not found" });
+    }
+
+    const existingActiveAward = await Award.findOne({
+      targetUser: user._id,
+      status: { $in: ["pending", "approved", "paid"] },
+    })
+      .select("_id status")
+      .lean();
+    if (existingActiveAward) {
+      return res.status(400).json({
+        message: "This user already has an active award. Complete or reject it before creating another payment.",
+      });
     }
 
     const paymentInput = parseAwardPaymentInput(paymentMethodType, paymentMethodValue);
@@ -1385,6 +1419,15 @@ export const awardUser = async (req: Request, res: Response) => {
         needsPaymentMethod: shouldWaitForPaymentMethod,
       });
     }
+
+    await sendAwardChatMessage({
+      adminId,
+      userId: user._id,
+      senderId: adminId,
+      content: shouldWaitForPaymentMethod
+        ? `Award update: You were awarded${user.userAwardAmount > 0 ? ` Rs ${user.userAwardAmount}` : ""}. Please add or update your payment details so we can send money.`
+        : `Award update: You were awarded${user.userAwardAmount > 0 ? ` Rs ${user.userAwardAmount}` : ""}. Payment will be processed by admin.`,
+    });
 
     res.status(200).json({
       success: true,
@@ -1452,7 +1495,14 @@ export const getAllAwards = async (req: Request, res: Response) => {
 export const updateAward = async (req: Request, res: Response) => {
   try {
     const { awardId } = req.params;
-    const { status, showInFeed, priority, amount } = req.body;
+    const {
+      status,
+      showInFeed,
+      priority,
+      amount,
+      paymentTransactionId,
+      paymentScreenshotUrl,
+    } = req.body;
 
     const award = await Award.findById(awardId);
     if (!award) {
@@ -1462,17 +1512,53 @@ export const updateAward = async (req: Request, res: Response) => {
     const previousStatus = award.status;
     const requestedStatus = typeof status === "string" ? String(status) : undefined;
     const hasRequestedStatus = typeof requestedStatus === "string";
+    const normalizedTransactionId =
+      typeof paymentTransactionId === "string" ? paymentTransactionId.trim() : "";
+    const normalizedScreenshotUrl =
+      typeof paymentScreenshotUrl === "string" ? paymentScreenshotUrl.trim() : "";
     const validStatuses = ["pending", "approved", "paid", "rejected"];
 
     if (hasRequestedStatus && !validStatuses.includes(requestedStatus)) {
       return res.status(400).json({ message: "Invalid award status" });
     }
 
+    if (previousStatus === "paid" && hasRequestedStatus) {
+      return res.status(400).json({
+        message: "Payment for this award is already completed and cannot be changed",
+      });
+    }
+
     if (hasRequestedStatus) {
       award.status = requestedStatus as "pending" | "approved" | "paid" | "rejected";
     }
 
-    if (award.status === "paid") {
+    const movingToPaid = previousStatus !== "paid" && award.status === "paid";
+
+    if (movingToPaid) {
+      const existingTransactionId =
+        typeof award.paymentProof?.transactionId === "string"
+          ? award.paymentProof.transactionId.trim()
+          : "";
+      const existingScreenshotUrl =
+        typeof award.paymentProof?.screenshotUrl === "string"
+          ? award.paymentProof.screenshotUrl.trim()
+          : "";
+
+      const proofTransactionId = normalizedTransactionId || existingTransactionId;
+      const proofScreenshotUrl = normalizedScreenshotUrl || existingScreenshotUrl;
+
+      if (!proofTransactionId && !proofScreenshotUrl) {
+        return res.status(400).json({
+          message: "Add transaction ID or screenshot before marking payment completed",
+        });
+      }
+
+      award.paymentProof = {
+        transactionId: proofTransactionId || undefined,
+        screenshotUrl: proofScreenshotUrl || undefined,
+        addedAt: new Date(),
+      } as any;
+
       if (!award.paymentMethod?.type || !award.paymentMethod?.value) {
         const recipient = await User.findById(award.targetUser).select("awardPaymentMethod");
         const recipientMethod = (recipient as any)?.awardPaymentMethod;
@@ -1520,11 +1606,19 @@ export const updateAward = async (req: Request, res: Response) => {
       });
     }
 
-    if (previousStatus !== "paid" && award.status === "paid") {
+    if (movingToPaid) {
+      const proofParts: string[] = [];
+      if (award.paymentProof?.transactionId) {
+        proofParts.push(`Transaction ID: ${award.paymentProof.transactionId}`);
+      }
+      if (award.paymentProof?.screenshotUrl) {
+        proofParts.push(`Screenshot: ${award.paymentProof.screenshotUrl}`);
+      }
+      const proofSuffix = proofParts.length > 0 ? ` Proof: ${proofParts.join(" | ")}.` : "";
       const paidMessage =
         award.amount > 0
-          ? `Congratulations! You received Rs ${award.amount}.`
-          : "Congratulations! Your award has been completed.";
+          ? `Congratulations! You received Rs ${award.amount}.${proofSuffix}`
+          : `Congratulations! Your award has been completed.${proofSuffix}`;
       await createAwardNotification({
         recipientId: award.targetUser,
         senderId: (req as any).user._id,
@@ -1534,6 +1628,13 @@ export const updateAward = async (req: Request, res: Response) => {
         amount: award.amount || 0,
         needsPaymentMethod: false,
         ...(award.type === "post" && award.targetPost ? { postId: award.targetPost } : {}),
+      });
+
+      await sendAwardChatMessage({
+        adminId: (req as any).user._id,
+        userId: award.targetUser,
+        senderId: (req as any).user._id,
+        content: `Payment sent for your award${award.amount > 0 ? `: Rs ${award.amount}` : ""}.${proofSuffix}`,
       });
     }
 
