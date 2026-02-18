@@ -17,7 +17,9 @@ import {
   savePushToken,
   removePushToken,
   deleteMyAccount,
-  reportUser
+  reportUser,
+  getAwardPaymentMethod,
+  updateAwardPaymentMethod,
 } from "../controllers/userController.js";
 
 const router = Router();
@@ -30,6 +32,11 @@ router.put("/profile", requireAuth, updateUserProfile);
 router.get("/payment-details", requireAuth, getMyPaymentDetails);
 router.put("/payment-details", requireAuth, updatePaymentDetails);
 router.get("/payment-details/:id", requireAuth, getSellerPaymentDetails);
+
+// Award payment method routes
+router.get("/award-payment", requireAuth, getAwardPaymentMethod);
+router.put("/award-payment", requireAuth, updateAwardPaymentMethod);
+
 router.post("/follow/:id", requireAuth, followUser);
 router.post("/unfollow/:id", requireAuth, unfollowUser);
 router.get("/follow-status/:id", requireAuth, checkFollowStatus);

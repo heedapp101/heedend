@@ -8,6 +8,7 @@ import { Types } from "mongoose";
 import User from "../models/User.js";
 import { getRedisPubSubClients } from "../config/redis.js";
 import { markUserOnline, markUserOffline, isUserOnline as isUserOnlineStore } from "../utils/presenceStore.js";
+import { sendChatNotification } from "../utils/pushNotifications.js";
 
 interface AuthenticatedSocket extends Socket {
   userId?: string;
@@ -100,6 +101,36 @@ const clearReadReceiptThrottleForUser = (userId: string) => {
       readReceiptThrottleMap.delete(key);
     }
   });
+};
+
+const getMessagePreviewText = ({
+  content,
+  messageType,
+  product,
+  paymentRequest,
+  startInquiry,
+}: {
+  content?: string;
+  messageType: NonNullable<MessagePayload["messageType"]>;
+  product?: MessagePayload["product"];
+  paymentRequest?: MessagePayload["paymentRequest"];
+  startInquiry?: boolean;
+}) => {
+  if (startInquiry) {
+    return `Inquiry: ${product?.title || "Product"}`;
+  }
+  if (messageType === "product") {
+    return `Product: ${product?.title || "Product"}`;
+  }
+  if (messageType === "image") {
+    return "Photo";
+  }
+  if (messageType === "payment-request") {
+    const amount = Number(paymentRequest?.amount || 0);
+    return amount > 0 ? `Payment request: INR ${amount}` : "Payment request";
+  }
+  const trimmedContent = String(content || "").trim();
+  return trimmedContent.length > 0 ? trimmedContent : "New message";
 };
 
 export const emitMessageToChat = (chatId: string, payload: any) => {
@@ -555,15 +586,16 @@ export async function initializeSocket(server: HttpServer) {
         };
 
         const savedMessage = await Message.create(newMessage);
+        const messagePreviewText = getMessagePreviewText({
+          content,
+          messageType: startInquiry ? "inquiry" : messageType,
+          product,
+          paymentRequest,
+          startInquiry,
+        });
 
         chat.lastMessage = {
-          content: startInquiry
-            ? `Inquiry: ${product?.title || "Product"}`
-            : messageType === "product"
-              ? `Product: ${product?.title || "Product"}`
-              : messageType === "image"
-                ? "Photo"
-                : content,
+          content: messagePreviewText,
           sender: new Types.ObjectId(socket.userId),
           createdAt: new Date(),
         };
@@ -594,6 +626,38 @@ export async function initializeSocket(server: HttpServer) {
             });
           }
         });
+
+        // Send push notifications only to recipients who are currently offline.
+        const recipientIds = chat.participants
+          .map((participantId) => participantId.toString())
+          .filter((participantId) => participantId !== socket.userId);
+        if (recipientIds.length > 0) {
+          void (async () => {
+            try {
+              const sender = await User.findById(socket.userId).select("name username").lean();
+              const senderName =
+                String((sender as any)?.name || "").trim() ||
+                String((sender as any)?.username || "").trim() ||
+                "Someone";
+
+              await Promise.allSettled(
+                recipientIds.map(async (recipientId) => {
+                  const recipientOnline = await isUserOnlineStore(recipientId);
+                  if (recipientOnline) return;
+                  await sendChatNotification(
+                    socket.userId as string,
+                    recipientId,
+                    senderName,
+                    messagePreviewText,
+                    chatId
+                  );
+                })
+              );
+            } catch (pushError) {
+              console.error("Chat push notification error:", pushError);
+            }
+          })();
+        }
 
         // Run business auto-reply in background to keep send-message path responsive
         if (String(chat.requestStatus || "none") !== "pending") {

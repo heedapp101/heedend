@@ -182,7 +182,7 @@ export const getOrCreateChat = async (req: AuthRequest, res: Response) => {
     let chat = await Chat.findOne({
       participants: { $all: [userId, recipientId] },
       isActive: true,
-    }).populate("participants", "username name companyName profilePic userType isVerified");
+    }).populate("participants", "username name companyName profilePic userType isVerified isDeleted");
 
     if (!chat) {
       const pendingRequest = shouldCreatePendingRequest(
@@ -287,8 +287,8 @@ export const getUserChats = async (req: AuthRequest, res: Response) => {
 
     const [chats, total] = await Promise.all([
       Chat.find(query)
-      .populate("participants", "username name companyName profilePic userType isVerified")
-      .populate("lastMessage.sender", "username name companyName userType")
+      .populate("participants", "username name companyName profilePic userType isVerified isDeleted")
+      .populate("lastMessage.sender", "username name companyName userType isDeleted")
       .sort({ "lastMessage.createdAt": -1, updatedAt: -1 })
       .skip(skip)
       .limit(limit)
@@ -375,7 +375,7 @@ export const getChatById = async (req: AuthRequest, res: Response) => {
     const skip = (page - 1) * limit;
 
     const chat = await Chat.findById(chatId)
-      .populate("participants", "username name companyName profilePic userType isVerified phone");
+      .populate("participants", "username name companyName profilePic userType isVerified isDeleted phone");
 
     if (!chat) {
       return res.status(404).json({ message: "Chat not found" });
@@ -893,7 +893,7 @@ export const adminGetAllChats = async (req: AuthRequest, res: Response) => {
     let query: any = { chatType: "admin" };
 
     const chats = await Chat.find(query)
-      .populate("participants", "username name companyName profilePic userType")
+      .populate("participants", "username name companyName profilePic userType isDeleted")
       .sort({ "lastMessage.createdAt": -1 })
       .skip(skip)
       .limit(Number(limit));
@@ -927,7 +927,7 @@ export const adminInitiateChat = async (req: AuthRequest, res: Response) => {
       participants: { $all: [adminId, userId] },
       chatType: "admin",
       isActive: true,
-    }).populate("participants", "username name companyName profilePic userType");
+    }).populate("participants", "username name companyName profilePic userType isDeleted");
 
     if (!chat) {
       chat = new Chat({
@@ -938,7 +938,7 @@ export const adminInitiateChat = async (req: AuthRequest, res: Response) => {
       await chat.save();
       chat = await Chat.findById(chat._id).populate(
         "participants",
-        "username name profilePic userType"
+        "username name profilePic userType isDeleted"
       );
     }
 

@@ -47,7 +47,7 @@ export interface IUser extends Document {
   inventoryAlertThreshold?: number;
   
   // Verification & Store
-  idProofType?: 'GST' | 'PAN' | 'Aadhaar'; // One of these is mandatory
+  idProofType?: 'GST' | 'Driving License' | 'PAN' | 'Aadhaar'; // PAN/Aadhaar kept as legacy values
   idProofNumber?: string; // ✅ The ID number
   idProofUrl?: string;  // ✅ URL to the uploaded doc
   productType?: string; // ✅ New
@@ -86,6 +86,20 @@ export interface IUser extends Document {
     version: number;
     acceptedAt: Date;
   }[];
+
+  // --- Award Payment Method (for receiving awards) ---
+  awardPaymentMethod?: {
+    type: 'upi' | 'phone';
+    value: string;
+  };
+
+  // --- User Awards (direct user awards, not post awards) ---
+  isAwarded?: boolean;
+  userAwardMessage?: string;
+  userAwardAmount?: number;
+  userAwardStatus?: 'pending' | 'approved' | 'paid' | 'rejected';
+  userAwardedAt?: Date;
+  userAwardShowInFeed?: boolean;
 
   // --- Deletion ---
   isDeleted: boolean;
@@ -152,10 +166,10 @@ const userSchema = new Schema<IUser>(
     address: { type: String, trim: true },
     gstNumber: { type: String, trim: true }, // Optional, not all businesses have GST immediately
     
-    // Identity Proof (One of: GST, PAN, Aadhaar)
+    // Identity Proof (GST and Driving License are active; PAN/Aadhaar are legacy)
     idProofType: { 
       type: String, 
-      enum: ['GST', 'PAN', 'Aadhaar'],
+      enum: ['GST', 'Driving License', 'PAN', 'Aadhaar'],
       trim: true 
     },
     idProofNumber: { type: String, trim: true },
@@ -189,6 +203,24 @@ const userSchema = new Schema<IUser>(
       phone: { type: String, trim: true, default: "" },
       note: { type: String, trim: true, default: "" },
     },
+
+    // Award Payment Method (for receiving award payments)
+    awardPaymentMethod: {
+      type: { type: String, enum: ['upi', 'phone'] },
+      value: { type: String, trim: true },
+    },
+
+    // User Awards (direct user awards)
+    isAwarded: { type: Boolean, default: false },
+    userAwardMessage: { type: String, trim: true, maxlength: 500 },
+    userAwardAmount: { type: Number, min: 0 },
+    userAwardStatus: {
+      type: String,
+      enum: ['pending', 'approved', 'paid', 'rejected'],
+      default: 'pending',
+    },
+    userAwardedAt: { type: Date },
+    userAwardShowInFeed: { type: Boolean, default: true },
     
     // --- Social Features (denormalized counts) ---
     followersCount: { type: Number, default: 0 },
@@ -241,9 +273,9 @@ userSchema.pre("save", function (next) {
   this.emailLower = this.email ? this.email.toLowerCase() : this.emailLower;
 
   if (this.userType === "business") {
-    // Ensure they provided an ID Proof (one of: GST, PAN, Aadhaar)
+    // Ensure they provided an ID Proof
     if (!this.idProofType || !this.idProofNumber || !this.idProofUrl) {
-      return next(new Error("Business accounts require a valid ID proof (GST, PAN, or Aadhaar) with number and document upload."));
+      return next(new Error("Business accounts require a valid ID proof with number and document upload."));
     }
   }
   next();

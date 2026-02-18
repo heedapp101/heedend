@@ -207,8 +207,8 @@ interface SignupRequestBody {
   address?: string;
   country?: string;
   
-  // ID Proof (One of: GST, PAN, Aadhaar)
-  idProofType?: 'GST' | 'PAN' | 'Aadhaar';
+  // ID Proof (GST and Driving License accepted for new onboarding)
+  idProofType?: 'GST' | 'Driving License' | 'PAN' | 'Aadhaar';
   idProofNumber?: string;
   idProofUrl?: string;
   
@@ -305,6 +305,21 @@ export const signup = async (
       return res.status(400).json({ message: "Missing required fields" });
     }
 
+    // 1b. Business ID proof validation
+    if (userType === "business") {
+      const activeIdProofTypes = new Set(["GST", "Driving License"]);
+
+      if (!idProofType) {
+        return res.status(400).json({ message: "ID proof type is required for business accounts" });
+      }
+
+      if (!activeIdProofTypes.has(String(idProofType))) {
+        return res.status(400).json({
+          message: "Only GST or Driving License is allowed for business verification",
+        });
+      }
+    }
+
     // 2. Check Duplicates
     const normalizedEmail = email.toLowerCase().trim();
     const normalizedUsername = username.toLowerCase().trim();
@@ -369,7 +384,7 @@ export const signup = async (
       address: userType === "business" ? address : undefined,
       country: userType === "business" ? country : undefined,
       
-      // ID Proof (One of: GST, PAN, Aadhaar)
+      // ID Proof
       idProofType: userType === "business" ? idProofType : undefined,
       idProofNumber: userType === "business" ? idProofNumber : undefined,
       idProofUrl: userType === "business" ? idProofUrl : undefined,

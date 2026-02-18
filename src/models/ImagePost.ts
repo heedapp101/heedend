@@ -74,10 +74,12 @@ const imagePostSchema = new Schema(
       default: "pending",
     },
     awardAmount: { type: Number, min: 0 },
+    awardMessage: { type: String, maxlength: 500 }, // Custom message for award
     awardedAt: { type: Date },
     awardPaidAt: { type: Date },
     awardHidden: { type: Boolean, default: false },
     awardPriority: { type: Number, default: 0 },
+    awardShowInFeed: { type: Boolean, default: true }, // Admin can toggle visibility in feeds
   },
   { timestamps: true }
 );

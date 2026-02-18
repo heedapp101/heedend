@@ -667,6 +667,85 @@ export const getSellerPaymentDetails = async (req: AuthRequest, res: Response) =
   }
 };
 
+// GET Award Payment Method (for receiving award payments)
+export const getAwardPaymentMethod = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ message: "Unauthorized" });
+
+    const user = await User.findById(req.user._id).select("awardPaymentMethod");
+    if (!user || (user as any).isDeleted) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const method = (user as any).awardPaymentMethod || {};
+    const hasMethod = method?.type && method?.value;
+
+    res.json({
+      awardPaymentMethod: hasMethod ? method : null,
+      hasPaymentMethod: hasMethod,
+    });
+  } catch (err) {
+    console.error("Get award payment method error:", err);
+    res.status(500).json({ message: "Failed to fetch award payment method" });
+  }
+};
+
+// UPDATE Award Payment Method (UPI or Phone)
+export const updateAwardPaymentMethod = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ message: "Unauthorized" });
+
+    const { type, value } = req.body || {};
+
+    // Validate type
+    if (!type || !["upi", "phone"].includes(type)) {
+      return res.status(400).json({ message: "Type must be 'upi' or 'phone'" });
+    }
+
+    // Validate value
+    if (!value || typeof value !== "string" || value.trim().length === 0) {
+      return res.status(400).json({ message: "Payment value is required" });
+    }
+
+    const trimmedValue = value.trim();
+
+    // Basic validation
+    if (type === "upi") {
+      // UPI ID should contain @ symbol
+      if (!trimmedValue.includes("@")) {
+        return res.status(400).json({ message: "Invalid UPI ID format (should be like name@bank)" });
+      }
+    } else if (type === "phone") {
+      // Phone should be 10 digits
+      const phoneDigits = trimmedValue.replace(/\D/g, "");
+      if (phoneDigits.length !== 10) {
+        return res.status(400).json({ message: "Phone number must be 10 digits" });
+      }
+    }
+
+    const user = await User.findById(req.user._id);
+    if (!user || (user as any).isDeleted) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    (user as any).awardPaymentMethod = {
+      type,
+      value: trimmedValue,
+    };
+
+    await user.save();
+
+    res.json({
+      message: "Award payment method updated",
+      awardPaymentMethod: (user as any).awardPaymentMethod,
+      hasPaymentMethod: true,
+    });
+  } catch (err: any) {
+    console.error("Update award payment method error:", err);
+    res.status(500).json({ message: err.message || "Failed to update award payment method" });
+  }
+};
+
 // Remove push token
 export const removePushToken = async (req: AuthRequest, res: Response) => {
   try {
@@ -795,17 +874,12 @@ export const deleteMyAccount = async (req: AuthRequest, res: Response) => {
     ]);
 
     // ──────────────────────────────────────────────
-    // 5) Clean up chats and messages
+    // 5) Keep chats but mark messages from deleted user
+    // Note: Chats are preserved so the other participant can
+    // still see chat history. The deleted user's info will
+    // display as "Deleted Account" since isDeleted is true.
     // ──────────────────────────────────────────────
-    const userChats = await Chat.find({ participants: userId }).select("_id").lean();
-    const chatIds = userChats.map((c: any) => c._id);
-
-    if (chatIds.length > 0) {
-      await Promise.all([
-        Message.deleteMany({ chat: { $in: chatIds } }),
-        Chat.deleteMany({ _id: { $in: chatIds } }),
-      ]);
-    }
+    // No chat/message deletion - keep for other participants
 
     // ──────────────────────────────────────────────
     // 6) Clean up reports

@@ -19,6 +19,13 @@ import {
   banReportedUser,
   updateAdminProfile,
   getAdminProfile,
+  // New award functions
+  awardPost,
+  awardUser,
+  getAllAwards,
+  updateAward,
+  deleteAward,
+  getAwardedContent,
 } from "../controllers/adminController.js";
 import { upload } from "../middleware/upload.js";
 import { requireAuth } from "../middleware/authMiddleware.js";
@@ -36,10 +43,18 @@ router.get("/approvals", requireAuth, adminMiddleware, getPendingApprovals);
 router.put("/approve/:id", requireAuth, adminMiddleware, approveUser);
 router.delete("/reject/:id", requireAuth, adminMiddleware, rejectUser);
 
-// ✅ AWARDS / PROMOTION
+// ✅ AWARDS / PROMOTION (Legacy)
 router.get("/awards/candidates", requireAuth, adminMiddleware, getAwardCandidates);
 router.patch("/awards/:postId", requireAuth, adminMiddleware, updateAwardStatus);
 router.patch("/posts/:postId/visibility", requireAuth, adminMiddleware, updatePostVisibility);
+
+// ✅ ENHANCED AWARDS SYSTEM
+router.get("/awards/all", requireAuth, adminMiddleware, getAllAwards);
+router.post("/awards/post/:postId", requireAuth, adminMiddleware, awardPost);
+router.post("/awards/user/:userId", requireAuth, adminMiddleware, awardUser);
+router.put("/awards/manage/:awardId", requireAuth, adminMiddleware, updateAward);
+router.delete("/awards/manage/:awardId", requireAuth, adminMiddleware, deleteAward);
+router.get("/awards/public", getAwardedContent); // Public endpoint - no auth required
 
 // ✅ REPORTS: Manage reported posts
 router.get("/reports", requireAuth, adminMiddleware, getReportedPosts);

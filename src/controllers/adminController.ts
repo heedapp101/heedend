@@ -4,6 +4,8 @@ import ImagePost from "../models/ImagePost.js";
 import RecommendationAnalytics from "../models/RecommendationAnalytics.js";
 import Report from "../models/Report.js";
 import UserReport from "../models/UserReport.js";
+import { Award } from "../models/Award.js";
+import Notification from "../models/Notification.js";
 import crypto from "crypto";
 const signPrivateUrl = (url: string) => {
   // Only sign if it's a private URL
@@ -987,6 +989,356 @@ export const getAdminProfile = async (req: Request, res: Response) => {
     res.status(200).json({ success: true, user });
   } catch (error: any) {
     console.error("Get Admin Profile Error:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/* =======================
+   ENHANCED AWARD SYSTEM
+   - Award posts with message
+   - Award users directly
+   - Manage all awards
+   - Send notifications
+======================= */
+
+// Award a post with custom message and optional payment
+export const awardPost = async (req: Request, res: Response) => {
+  try {
+    const adminId = (req as any).user._id;
+    const { postId } = req.params;
+    const { message, amount, showInFeed, priority, sendNotification } = req.body;
+
+    const post = await ImagePost.findById(postId).populate("user", "name username awardPaymentMethod pushTokens");
+    if (!post) {
+      return res.status(404).json({ message: "Post not found" });
+    }
+
+    const targetUser = post.user as any;
+    if (!targetUser) {
+      return res.status(404).json({ message: "Post owner not found" });
+    }
+
+    // Check if user has payment method
+    const hasPaymentMethod = targetUser.awardPaymentMethod?.type && targetUser.awardPaymentMethod?.value;
+
+    // Update post award fields
+    post.isAwarded = true;
+    post.awardMessage = message || "This post has exceptional engagement!";
+    post.awardAmount = amount || 0;
+    post.awardedAt = new Date();
+    post.awardStatus = hasPaymentMethod ? "approved" : "pending";
+    post.awardShowInFeed = showInFeed !== false;
+    post.awardPriority = priority || 0;
+
+    await post.save();
+
+    // Create award record
+    const award = await Award.create({
+      type: "post",
+      targetPost: post._id,
+      targetUser: targetUser._id,
+      message: post.awardMessage,
+      amount: post.awardAmount,
+      status: post.awardStatus,
+      showInFeed: post.awardShowInFeed,
+      priority: post.awardPriority,
+      awardedBy: adminId,
+      paymentMethod: hasPaymentMethod ? targetUser.awardPaymentMethod : undefined,
+    });
+
+    // Send notification to user
+    if (sendNotification !== false) {
+      await Notification.create({
+        recipient: targetUser._id,
+        sender: adminId,
+        type: "award",
+        title: "🏆 Congratulations! Your post has been awarded!",
+        message: post.awardMessage + (amount > 0 ? ` You'll receive ₹${amount}!` : ""),
+        data: {
+          postId: post._id,
+          awardId: award._id,
+          amount: post.awardAmount,
+          needsPaymentMethod: !hasPaymentMethod,
+        },
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Post awarded successfully",
+      award,
+      post: {
+        _id: post._id,
+        title: post.title,
+        isAwarded: post.isAwarded,
+        awardMessage: post.awardMessage,
+        awardAmount: post.awardAmount,
+        awardStatus: post.awardStatus,
+      },
+      userHasPaymentMethod: hasPaymentMethod,
+    });
+  } catch (error: any) {
+    console.error("Award Post Error:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Award a user directly (not tied to a post)
+export const awardUser = async (req: Request, res: Response) => {
+  try {
+    const adminId = (req as any).user._id;
+    const { userId } = req.params;
+    const { message, amount, showInFeed, priority, sendNotification } = req.body;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const hasPaymentMethod = user.awardPaymentMethod?.type && user.awardPaymentMethod?.value;
+
+    // Update user award fields
+    user.isAwarded = true;
+    user.userAwardMessage = message || "This account has exceptional engagement!";
+    user.userAwardAmount = amount || 0;
+    user.userAwardedAt = new Date();
+    user.userAwardStatus = hasPaymentMethod ? "approved" : "pending";
+    user.userAwardShowInFeed = showInFeed !== false;
+
+    await user.save();
+
+    // Create award record
+    const award = await Award.create({
+      type: "user",
+      targetUser: user._id,
+      message: user.userAwardMessage,
+      amount: user.userAwardAmount,
+      status: user.userAwardStatus,
+      showInFeed: user.userAwardShowInFeed,
+      priority: priority || 0,
+      awardedBy: adminId,
+      paymentMethod: hasPaymentMethod ? user.awardPaymentMethod : undefined,
+    });
+
+    // Send notification
+    if (sendNotification !== false) {
+      await Notification.create({
+        recipient: user._id,
+        sender: adminId,
+        type: "award",
+        title: "🏆 Congratulations! You've been awarded!",
+        message: user.userAwardMessage + (amount > 0 ? ` You'll receive ₹${amount}!` : ""),
+        data: {
+          awardId: award._id,
+          amount: user.userAwardAmount,
+          needsPaymentMethod: !hasPaymentMethod,
+        },
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "User awarded successfully",
+      award,
+      userHasPaymentMethod: hasPaymentMethod,
+    });
+  } catch (error: any) {
+    console.error("Award User Error:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Get all awards for admin management
+export const getAllAwards = async (req: Request, res: Response) => {
+  try {
+    const { type, status, page = 1, limit = 20 } = req.query;
+    const skip = (Number(page) - 1) * Number(limit);
+
+    const filter: any = {};
+    if (type && ["post", "user"].includes(type as string)) {
+      filter.type = type;
+    }
+    if (status && ["pending", "approved", "paid", "rejected"].includes(status as string)) {
+      filter.status = status;
+    }
+
+    const [awards, total] = await Promise.all([
+      Award.find(filter)
+        .populate("targetPost", "title images")
+        .populate("targetUser", "name username profilePic awardPaymentMethod")
+        .populate("awardedBy", "name username")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(Number(limit))
+        .lean(),
+      Award.countDocuments(filter),
+    ]);
+
+    res.status(200).json({
+      awards,
+      total,
+      page: Number(page),
+      pages: Math.ceil(total / Number(limit)),
+    });
+  } catch (error: any) {
+    console.error("Get All Awards Error:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Update award status (approve, pay, reject)
+export const updateAward = async (req: Request, res: Response) => {
+  try {
+    const { awardId } = req.params;
+    const { status, showInFeed, priority, amount } = req.body;
+
+    const award = await Award.findById(awardId);
+    if (!award) {
+      return res.status(404).json({ message: "Award not found" });
+    }
+
+    if (status) {
+      award.status = status;
+      if (status === "paid") {
+        award.paidAt = new Date();
+      }
+    }
+
+    if (typeof showInFeed === "boolean") {
+      award.showInFeed = showInFeed;
+    }
+
+    if (typeof priority === "number") {
+      award.priority = priority;
+    }
+
+    if (typeof amount === "number" && amount >= 0) {
+      award.amount = amount;
+    }
+
+    await award.save();
+
+    // Sync with post/user if applicable
+    if (award.type === "post" && award.targetPost) {
+      await ImagePost.findByIdAndUpdate(award.targetPost, {
+        awardStatus: award.status,
+        awardShowInFeed: award.showInFeed,
+        awardPriority: award.priority,
+        awardAmount: award.amount,
+        ...(status === "paid" ? { awardPaidAt: new Date() } : {}),
+      });
+    } else if (award.type === "user") {
+      await User.findByIdAndUpdate(award.targetUser, {
+        userAwardStatus: award.status,
+        userAwardShowInFeed: award.showInFeed,
+        userAwardAmount: award.amount,
+      });
+    }
+
+    res.status(200).json({ success: true, award });
+  } catch (error: any) {
+    console.error("Update Award Error:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Delete/revoke an award
+export const deleteAward = async (req: Request, res: Response) => {
+  try {
+    const { awardId } = req.params;
+
+    const award = await Award.findById(awardId);
+    if (!award) {
+      return res.status(404).json({ message: "Award not found" });
+    }
+
+    // Remove award flags from post/user
+    if (award.type === "post" && award.targetPost) {
+      await ImagePost.findByIdAndUpdate(award.targetPost, {
+        isAwarded: false,
+        awardStatus: "pending",
+        awardMessage: undefined,
+        awardAmount: undefined,
+        awardedAt: undefined,
+        awardPaidAt: undefined,
+        awardShowInFeed: false,
+        awardPriority: 0,
+      });
+    } else if (award.type === "user") {
+      await User.findByIdAndUpdate(award.targetUser, {
+        isAwarded: false,
+        userAwardStatus: "pending",
+        userAwardMessage: undefined,
+        userAwardAmount: undefined,
+        userAwardedAt: undefined,
+        userAwardShowInFeed: false,
+      });
+    }
+
+    await award.deleteOne();
+
+    res.status(200).json({ success: true, message: "Award revoked successfully" });
+  } catch (error: any) {
+    console.error("Delete Award Error:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Get awarded content for public display (posts + users)
+export const getAwardedContent = async (req: Request, res: Response) => {
+  try {
+    const { limit = 4 } = req.query;
+    const maxLimit = Math.min(Number(limit), 10);
+
+    // Get awarded posts that are visible
+    const awardedPosts = await ImagePost.find({
+      isAwarded: true,
+      awardShowInFeed: true,
+      awardHidden: { $ne: true },
+      adminHidden: { $ne: true },
+      isArchived: { $ne: true },
+    })
+      .populate("user", "name username profilePic userType")
+      .select("_id title images awardMessage awardAmount awardedAt user")
+      .sort({ awardPriority: -1, awardedAt: -1 })
+      .limit(maxLimit)
+      .lean();
+
+    // Get awarded users that are visible
+    const awardedUsers = await User.find({
+      isAwarded: true,
+      userAwardShowInFeed: true,
+      isDeleted: { $ne: true },
+    })
+      .select("_id name username profilePic userType userAwardMessage userAwardAmount userAwardedAt")
+      .sort({ userAwardedAt: -1 })
+      .limit(maxLimit)
+      .lean();
+
+    const totalAwardedPosts = await ImagePost.countDocuments({
+      isAwarded: true,
+      awardShowInFeed: true,
+      awardHidden: { $ne: true },
+      adminHidden: { $ne: true },
+      isArchived: { $ne: true },
+    });
+
+    const totalAwardedUsers = await User.countDocuments({
+      isAwarded: true,
+      userAwardShowInFeed: true,
+      isDeleted: { $ne: true },
+    });
+
+    res.status(200).json({
+      posts: awardedPosts,
+      users: awardedUsers,
+      hasMorePosts: totalAwardedPosts > maxLimit,
+      hasMoreUsers: totalAwardedUsers > maxLimit,
+      totalPosts: totalAwardedPosts,
+      totalUsers: totalAwardedUsers,
+    });
+  } catch (error: any) {
+    console.error("Get Awarded Content Error:", error);
     res.status(500).json({ message: error.message });
   }
 };
