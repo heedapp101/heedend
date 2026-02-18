@@ -1194,6 +1194,7 @@ export const awardPost = async (req: Request, res: Response) => {
       sendNotification,
       paymentMethodType,
       paymentMethodValue,
+      requestPaymentFirst,
     } = req.body;
 
     const post = await ImagePost.findById(postId).populate("user", "name username awardPaymentMethod pushTokens");
@@ -1225,13 +1226,16 @@ export const awardPost = async (req: Request, res: Response) => {
 
     // Check if user has payment method
     const hasPaymentMethod = targetUser.awardPaymentMethod?.type && targetUser.awardPaymentMethod?.value;
+    const shouldRequestPaymentFirst = requestPaymentFirst === true;
+    const shouldWaitForPaymentMethod = shouldRequestPaymentFirst || !hasPaymentMethod;
+    const resolvedAwardStatus = shouldWaitForPaymentMethod ? "pending" : "approved";
 
     // Update post award fields
     post.isAwarded = true;
     post.awardMessage = message || "This post has exceptional engagement!";
     post.awardAmount = parsedAmount || 0;
     post.awardedAt = new Date();
-    post.awardStatus = hasPaymentMethod ? "approved" : "pending";
+    post.awardStatus = resolvedAwardStatus;
     post.awardShowInFeed = showInFeed !== false;
     post.awardPriority = priority || 0;
 
@@ -1244,18 +1248,21 @@ export const awardPost = async (req: Request, res: Response) => {
       targetUser: targetUser._id,
       message: post.awardMessage,
       amount: post.awardAmount,
-      status: post.awardStatus,
+      status: resolvedAwardStatus,
       showInFeed: post.awardShowInFeed,
       priority: post.awardPriority,
       awardedBy: adminId,
-      paymentMethod: hasPaymentMethod ? targetUser.awardPaymentMethod : undefined,
+      paymentMethod:
+        !shouldWaitForPaymentMethod && hasPaymentMethod
+          ? targetUser.awardPaymentMethod
+          : undefined,
     });
 
     // Send notification to user
     if (sendNotification !== false) {
-      const awardMessage = hasPaymentMethod
-        ? `${post.awardMessage}${post.awardAmount > 0 ? ` You'll receive Rs ${post.awardAmount}.` : ""}`
-        : `${post.awardMessage} Add Google Pay UPI ID or phone number to receive this award.`;
+      const awardMessage = shouldWaitForPaymentMethod
+        ? `${post.awardMessage}${post.awardAmount > 0 ? ` You'll receive Rs ${post.awardAmount} after payment details are updated.` : ""} Please add or update your payment method to receive this award.`
+        : `${post.awardMessage}${post.awardAmount > 0 ? ` You'll receive Rs ${post.awardAmount}.` : ""}`;
 
       await createAwardNotification({
         recipientId: targetUser._id,
@@ -1264,7 +1271,7 @@ export const awardPost = async (req: Request, res: Response) => {
         message: awardMessage,
         awardId: award._id,
         amount: post.awardAmount || 0,
-        needsPaymentMethod: !hasPaymentMethod,
+        needsPaymentMethod: shouldWaitForPaymentMethod,
         postId: post._id,
       });
     }
@@ -1282,7 +1289,11 @@ export const awardPost = async (req: Request, res: Response) => {
         awardStatus: post.awardStatus,
       },
       userHasPaymentMethod: hasPaymentMethod,
-      paymentMethod: hasPaymentMethod ? targetUser.awardPaymentMethod : null,
+      waitingForPaymentMethod: shouldWaitForPaymentMethod,
+      paymentMethod:
+        !shouldWaitForPaymentMethod && hasPaymentMethod
+          ? targetUser.awardPaymentMethod
+          : null,
     });
   } catch (error: any) {
     console.error("Award Post Error:", error);
@@ -1303,6 +1314,7 @@ export const awardUser = async (req: Request, res: Response) => {
       sendNotification,
       paymentMethodType,
       paymentMethodValue,
+      requestPaymentFirst,
     } = req.body;
 
     const user = await User.findById(userId);
@@ -1327,13 +1339,16 @@ export const awardUser = async (req: Request, res: Response) => {
     }
 
     const hasPaymentMethod = user.awardPaymentMethod?.type && user.awardPaymentMethod?.value;
+    const shouldRequestPaymentFirst = requestPaymentFirst === true;
+    const shouldWaitForPaymentMethod = shouldRequestPaymentFirst || !hasPaymentMethod;
+    const resolvedAwardStatus = shouldWaitForPaymentMethod ? "pending" : "approved";
 
     // Update user award fields
     user.isAwarded = true;
     user.userAwardMessage = message || "This account has exceptional engagement!";
     user.userAwardAmount = parsedAmount || 0;
     user.userAwardedAt = new Date();
-    user.userAwardStatus = hasPaymentMethod ? "approved" : "pending";
+    user.userAwardStatus = resolvedAwardStatus;
     user.userAwardShowInFeed = showInFeed !== false;
 
     await user.save();
@@ -1344,18 +1359,21 @@ export const awardUser = async (req: Request, res: Response) => {
       targetUser: user._id,
       message: user.userAwardMessage,
       amount: user.userAwardAmount,
-      status: user.userAwardStatus,
+      status: resolvedAwardStatus,
       showInFeed: user.userAwardShowInFeed,
       priority: priority || 0,
       awardedBy: adminId,
-      paymentMethod: hasPaymentMethod ? user.awardPaymentMethod : undefined,
+      paymentMethod:
+        !shouldWaitForPaymentMethod && hasPaymentMethod
+          ? user.awardPaymentMethod
+          : undefined,
     });
 
     // Send notification
     if (sendNotification !== false) {
-      const awardMessage = hasPaymentMethod
-        ? `${user.userAwardMessage}${user.userAwardAmount > 0 ? ` You'll receive Rs ${user.userAwardAmount}.` : ""}`
-        : `${user.userAwardMessage} Add Google Pay UPI ID or phone number to receive this award.`;
+      const awardMessage = shouldWaitForPaymentMethod
+        ? `${user.userAwardMessage}${user.userAwardAmount > 0 ? ` You'll receive Rs ${user.userAwardAmount} after payment details are updated.` : ""} Please add or update your payment method to receive this award.`
+        : `${user.userAwardMessage}${user.userAwardAmount > 0 ? ` You'll receive Rs ${user.userAwardAmount}.` : ""}`;
 
       await createAwardNotification({
         recipientId: user._id,
@@ -1364,7 +1382,7 @@ export const awardUser = async (req: Request, res: Response) => {
         message: awardMessage,
         awardId: award._id,
         amount: user.userAwardAmount || 0,
-        needsPaymentMethod: !hasPaymentMethod,
+        needsPaymentMethod: shouldWaitForPaymentMethod,
       });
     }
 
@@ -1373,7 +1391,11 @@ export const awardUser = async (req: Request, res: Response) => {
       message: "User awarded successfully",
       award,
       userHasPaymentMethod: hasPaymentMethod,
-      paymentMethod: hasPaymentMethod ? user.awardPaymentMethod : null,
+      waitingForPaymentMethod: shouldWaitForPaymentMethod,
+      paymentMethod:
+        !shouldWaitForPaymentMethod && hasPaymentMethod
+          ? user.awardPaymentMethod
+          : null,
     });
   } catch (error: any) {
     console.error("Award User Error:", error);
@@ -1456,7 +1478,7 @@ export const updateAward = async (req: Request, res: Response) => {
         const recipientMethod = (recipient as any)?.awardPaymentMethod;
         if (!recipientMethod?.type || !recipientMethod?.value) {
           return res.status(400).json({
-            message: "User has not added a payment method yet",
+            message: "User has not added or updated a payment method yet",
           });
         }
         award.paymentMethod = {
