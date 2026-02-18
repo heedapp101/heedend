@@ -5,6 +5,8 @@ import {
   getChatById,
   sendMessage,
   getDefaultQuestions,
+  acceptChatRequest,
+  blockChatRequest,
   deleteChat,
   adminGetAllChats,
   adminInitiateChat,
@@ -45,6 +47,10 @@ router.post("/:chatId/message", sendMessage);
 
 // Send offer price (business users only)
 router.post("/:chatId/offer", sendOfferPrice);
+
+// Message request actions
+router.put("/:chatId/request/accept", acceptChatRequest);
+router.put("/:chatId/request/block", blockChatRequest);
 
 // Mark messages as read
 router.put("/:chatId/read", markMessagesRead);

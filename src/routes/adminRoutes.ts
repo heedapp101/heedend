@@ -17,7 +17,10 @@ import {
   getReportedUsers,
   updateUserReportStatus,
   banReportedUser,
+  updateAdminProfile,
+  getAdminProfile,
 } from "../controllers/adminController.js";
+import { upload } from "../middleware/upload.js";
 import { requireAuth } from "../middleware/authMiddleware.js";
 import { adminMiddleware } from "../middleware/roleMiddleware.js";
 
@@ -47,5 +50,9 @@ router.delete("/reports/post/:postId", requireAuth, adminMiddleware, deleteRepor
 router.get("/user-reports", requireAuth, adminMiddleware, getReportedUsers);
 router.put("/user-reports/:reportId", requireAuth, adminMiddleware, updateUserReportStatus);
 router.delete("/user-reports/user/:userId", requireAuth, adminMiddleware, banReportedUser);
+
+// ✅ ADMIN PROFILE: Display name & profile photo
+router.get("/profile", requireAuth, adminMiddleware, getAdminProfile);
+router.put("/profile", requireAuth, adminMiddleware, upload.single("profilePic"), updateAdminProfile);
 
 export default router;

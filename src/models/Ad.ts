@@ -14,6 +14,7 @@ export interface IAd extends Document {
   
   // Ad Type
   type: "in-feed" | "banner";
+  priority: number;
   
   // Scheduling
   startDate: Date;
@@ -61,6 +62,7 @@ const adSchema = new Schema<IAd>(
       required: true,
       default: "in-feed"
     },
+    priority: { type: Number, default: 999, min: 1 },
     
     // Scheduling
     startDate: { type: Date, required: true },
@@ -97,6 +99,7 @@ const adSchema = new Schema<IAd>(
 
 // Indexes for efficient querying
 adSchema.index({ type: 1, isActive: 1 }); // Filter active ads by type
+adSchema.index({ type: 1, priority: 1, createdAt: 1 }); // Priority ordering for display
 adSchema.index({ startDate: 1, endDate: 1 }); // Date range queries
 adSchema.index({ "payment.status": 1 }); // Payment filtering
 adSchema.index({ createdAt: -1 }); // Recent ads

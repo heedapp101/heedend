@@ -71,6 +71,11 @@ export interface IMessage {
 export interface IChat extends Document {
   participants: Types.ObjectId[];
   chatType: "general" | "business" | "admin"; // general-to-general, business-involved, admin-support
+  requestStatus: "none" | "pending" | "accepted" | "blocked";
+  requestInitiator?: Types.ObjectId;
+  requestRecipient?: Types.ObjectId;
+  requestSource?: "item" | "profile" | "unknown";
+  blockedBy?: Types.ObjectId;
   // Track multiple product inquiries
   inquiries: IInquiry[];
   activeInquiryId?: Types.ObjectId; // Currently active inquiry
@@ -182,6 +187,19 @@ const chatSchema = new Schema<IChat>(
       enum: ["general", "business", "admin"],
       default: "general",
     },
+    requestStatus: {
+      type: String,
+      enum: ["none", "pending", "accepted", "blocked"],
+      default: "none",
+    },
+    requestInitiator: { type: Schema.Types.ObjectId, ref: "User" },
+    requestRecipient: { type: Schema.Types.ObjectId, ref: "User" },
+    requestSource: {
+      type: String,
+      enum: ["item", "profile", "unknown"],
+      default: "unknown",
+    },
+    blockedBy: { type: Schema.Types.ObjectId, ref: "User" },
     // Multiple product inquiries
     inquiries: [inquirySchema],
     activeInquiryId: { type: Schema.Types.ObjectId },
@@ -211,6 +229,8 @@ const chatSchema = new Schema<IChat>(
 chatSchema.index({ participants: 1 });
 chatSchema.index({ "lastMessage.createdAt": -1 });
 chatSchema.index({ chatType: 1 });
+chatSchema.index({ requestStatus: 1, requestRecipient: 1, "lastMessage.createdAt": -1 });
+chatSchema.index({ requestStatus: 1, requestInitiator: 1, "lastMessage.createdAt": -1 });
 chatSchema.index({ "inquiries.status": 1 });
 chatSchema.index({ activeInquiryId: 1 });
 

@@ -933,3 +933,60 @@ export const banReportedUser = async (req: Request, res: Response) => {
     res.status(500).json({ message: error.message });
   }
 };
+
+// ==========================================
+// ADMIN PROFILE: Update display name & profile photo
+// ==========================================
+export const updateAdminProfile = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user._id;
+    const { name } = req.body;
+    const file = req.file;
+
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    // Update display name if provided
+    if (name && name.trim()) {
+      user.name = name.trim();
+    }
+
+    // Upload profile photo if provided
+    if (file) {
+      const { uploadFile } = await import("../utils/cloudflareR2.js");
+      const result = await uploadFile(file, "public");
+      user.profilePic = result.Location;
+    }
+
+    await user.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Profile updated successfully",
+      user: {
+        _id: user._id,
+        name: user.name,
+        username: user.username,
+        email: user.email,
+        profilePic: user.profilePic,
+        userType: user.userType,
+      },
+    });
+  } catch (error: any) {
+    console.error("Update Admin Profile Error:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+export const getAdminProfile = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user._id;
+    const user = await User.findById(userId).select("name username email profilePic userType");
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    res.status(200).json({ success: true, user });
+  } catch (error: any) {
+    console.error("Get Admin Profile Error:", error);
+    res.status(500).json({ message: error.message });
+  }
+};

@@ -31,6 +31,71 @@ const toIdString = (value: any): string => {
 const clampNumber = (value: number, min: number, max: number) =>
   Math.max(min, Math.min(max, value));
 
+type ChatRequestSource = "item" | "profile" | "unknown";
+
+const normalizeRequestSource = (value: any): ChatRequestSource => {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "item") return "item";
+  if (normalized === "profile") return "profile";
+  return "unknown";
+};
+
+const shouldBypassMessageRequest = (
+  senderType?: string,
+  recipientType?: string,
+  source: ChatRequestSource = "unknown"
+) => {
+  // Product ItemScreen chat from buyer -> seller should stay direct.
+  return source === "item" && senderType === "general" && recipientType === "business";
+};
+
+const shouldCreatePendingRequest = (
+  chatType: "general" | "business" | "admin",
+  senderType?: string,
+  recipientType?: string,
+  source: ChatRequestSource = "unknown"
+) => {
+  if (chatType === "admin") return false;
+  if (shouldBypassMessageRequest(senderType, recipientType, source)) return false;
+  return true;
+};
+
+const canUserSendInChat = (chat: any, userId?: string) => {
+  const requestStatus = String(chat?.requestStatus || "none");
+  const requester = toIdString(chat?.requestInitiator);
+  const requestRecipient = toIdString(chat?.requestRecipient);
+  const blockedBy = toIdString(chat?.blockedBy);
+  const currentUserId = toIdString(userId);
+
+  if (!currentUserId) {
+    return { allowed: false, message: "Not authorized" };
+  }
+
+  if (requestStatus === "blocked") {
+    if (blockedBy && blockedBy !== currentUserId) {
+      return { allowed: false, message: "You are blocked in this chat" };
+    }
+    return { allowed: false, message: "This chat is blocked" };
+  }
+
+  if (requestStatus === "pending" && requestRecipient === currentUserId) {
+    return { allowed: false, message: "Accept this message request before replying" };
+  }
+
+  if (requestStatus === "pending" && requester && requester !== currentUserId && requestRecipient !== currentUserId) {
+    return { allowed: false, message: "Not authorized" };
+  }
+
+  return { allowed: true };
+};
+
+const toChatVisibilityScope = (scope?: string) => {
+  const normalized = String(scope || "active").trim().toLowerCase();
+  if (normalized === "requests") return "requests";
+  if (normalized === "all") return "all";
+  return "active";
+};
+
 const normalizeInquiryForSocket = (inquiry: any) => {
   if (!inquiry) return null;
   return {
@@ -87,8 +152,9 @@ const emitRealtimeChatEvent = (
 // --- Get or Create Chat ---
 export const getOrCreateChat = async (req: AuthRequest, res: Response) => {
   try {
-    const { recipientId, productContext } = req.body;
+    const { recipientId, productContext, source } = req.body;
     const userId = req.user?._id;
+    const requestSource = normalizeRequestSource(source);
 
     if (!userId || !recipientId) {
       return res.status(400).json({ message: "User ID and Recipient ID required" });
@@ -119,10 +185,21 @@ export const getOrCreateChat = async (req: AuthRequest, res: Response) => {
     }).populate("participants", "username name companyName profilePic userType isVerified");
 
     if (!chat) {
+      const pendingRequest = shouldCreatePendingRequest(
+        chatType,
+        currentUser.userType,
+        recipientUser.userType,
+        requestSource
+      );
+
       // Create new chat
       chat = new Chat({
         participants: [userId, recipientId],
         chatType,
+        requestStatus: pendingRequest ? "pending" : "accepted",
+        requestInitiator: userId,
+        requestRecipient: recipientId,
+        requestSource,
         productContext: productContext || undefined,
         isActive: true,
       });
@@ -133,10 +210,34 @@ export const getOrCreateChat = async (req: AuthRequest, res: Response) => {
         "participants",
         "username name companyName profilePic userType isVerified"
       );
-    } else if (productContext && !chat.productContext) {
-      // Update product context if not set
-      chat.productContext = productContext;
-      await chat.save();
+    } else {
+      let didMutateChat = false;
+
+      if (chat.requestStatus === "blocked") {
+        const blockedBy = toIdString(chat.blockedBy);
+        if (blockedBy && blockedBy !== toIdString(userId)) {
+          return res.status(403).json({ message: "You are blocked in this chat" });
+        }
+      }
+
+      if (
+        chat.requestStatus === "pending" &&
+        toIdString(chat.requestRecipient) === toIdString(userId) &&
+        shouldBypassMessageRequest(currentUser.userType, recipientUser.userType, requestSource)
+      ) {
+        chat.requestStatus = "accepted";
+        chat.requestSource = requestSource;
+        didMutateChat = true;
+      }
+
+      if (productContext && !chat.productContext) {
+        chat.productContext = productContext;
+        didMutateChat = true;
+      }
+
+      if (didMutateChat) {
+        await chat.save();
+      }
     }
 
     return res.status(200).json(chat);
@@ -151,6 +252,7 @@ export const getUserChats = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user?._id;
     const { type } = req.query; // "business", "general", "admin", or undefined for all
+    const scope = toChatVisibilityScope(req.query.scope as string | undefined); // active | requests | all
     const page = clampNumber(parseInt(req.query.page as string) || 1, 1, 1000);
     const limit = clampNumber(parseInt(req.query.limit as string) || 20, 1, 100);
     const skip = (page - 1) * limit;
@@ -167,6 +269,21 @@ export const getUserChats = async (req: AuthRequest, res: Response) => {
     if (type && ["general", "business", "admin"].includes(type as string)) {
       query.chatType = type;
     }
+
+    const userIdString = toIdString(userId);
+    if (scope === "requests") {
+      query.requestStatus = "pending";
+      query.requestRecipient = userId;
+    } else if (scope === "active") {
+      query.$or = [
+        { requestStatus: { $exists: false } },
+        { requestStatus: { $in: ["none", "accepted"] } },
+        { requestStatus: "pending", requestInitiator: userId },
+      ];
+    }
+
+    // Hide blocked conversations from list for both sides.
+    query.$and = [...(query.$and || []), { $or: [{ requestStatus: { $ne: "blocked" } }, { requestStatus: { $exists: false } }] }];
 
     const [chats, total] = await Promise.all([
       Chat.find(query)
@@ -211,6 +328,13 @@ export const getUserChats = async (req: AuthRequest, res: Response) => {
         (p: any) => p._id.toString() !== userId?.toString()
       );
 
+      const requestStatus = String(chat.requestStatus || "none");
+      const requestInitiator = toIdString(chat.requestInitiator);
+      const requestRecipient = toIdString(chat.requestRecipient);
+      const isIncomingRequest = requestStatus === "pending" && requestRecipient === userIdString;
+      const isOutgoingRequest = requestStatus === "pending" && requestInitiator === userIdString;
+      const canReply = requestStatus !== "pending" || isOutgoingRequest;
+
       return {
         _id: chat._id,
         chatType: chat.chatType,
@@ -218,6 +342,13 @@ export const getUserChats = async (req: AuthRequest, res: Response) => {
         productContext: chat.productContext,
         lastMessage: chat.lastMessage,
         unreadCount,
+        requestStatus,
+        requestInitiator: requestInitiator || undefined,
+        requestRecipient: requestRecipient || undefined,
+        requestSource: chat.requestSource || "unknown",
+        isMessageRequest: isIncomingRequest,
+        requestDirection: isIncomingRequest ? "incoming" : isOutgoingRequest ? "outgoing" : null,
+        canReply,
         updatedAt: chat.updatedAt,
       };
     });
@@ -258,6 +389,19 @@ export const getChatById = async (req: AuthRequest, res: Response) => {
 
     if (!isParticipant && !isAdmin) {
       return res.status(403).json({ message: "Not authorized to view this chat" });
+    }
+
+    const requestStatus = String(chat.requestStatus || "none");
+    const requestInitiator = toIdString(chat.requestInitiator);
+    const requestRecipient = toIdString(chat.requestRecipient);
+    const blockedBy = toIdString(chat.blockedBy);
+    const userIdString = toIdString(userId);
+    const isIncomingRequest = requestStatus === "pending" && requestRecipient === userIdString;
+    const isOutgoingRequest = requestStatus === "pending" && requestInitiator === userIdString;
+    const canReply = requestStatus !== "pending" || isOutgoingRequest;
+
+    if (requestStatus === "blocked" && blockedBy && blockedBy !== userIdString && !isAdmin) {
+      return res.status(403).json({ message: "You are blocked in this chat" });
     }
 
     const messageExists = await Message.exists({ chat: chat._id });
@@ -309,6 +453,14 @@ export const getChatById = async (req: AuthRequest, res: Response) => {
 
     return res.status(200).json({
       ...chat.toObject(),
+      requestStatus,
+      requestInitiator: requestInitiator || undefined,
+      requestRecipient: requestRecipient || undefined,
+      requestSource: chat.requestSource || "unknown",
+      blockedBy: blockedBy || undefined,
+      isMessageRequest: isIncomingRequest,
+      requestDirection: isIncomingRequest ? "incoming" : isOutgoingRequest ? "outgoing" : null,
+      canReply,
       messages: messages.reverse(),
       pagination: {
         page,
@@ -347,6 +499,11 @@ export const sendMessage = async (req: AuthRequest, res: Response) => {
 
     if (!isParticipant) {
       return res.status(403).json({ message: "Not authorized" });
+    }
+
+    const sendAccess = canUserSendInChat(chat, toIdString(userId));
+    if (!sendAccess.allowed) {
+      return res.status(403).json({ message: sendAccess.message || "Message request pending" });
     }
 
     const normalizeProduct = (rawProduct: any) => {
@@ -459,7 +616,11 @@ export const sendMessage = async (req: AuthRequest, res: Response) => {
         userType: "business",
       }).select("autoReplyEnabled autoReplyMessage");
 
-      if (businessRecipient && req.user?.userType !== "business") {
+      if (
+        businessRecipient &&
+        req.user?.userType !== "business" &&
+        String(chat.requestStatus || "none") !== "pending"
+      ) {
         const autoReplyInquiryId = finalInquiryId || chat.activeInquiryId;
 
         // When user presses "Negotiate" button, always auto-reply
@@ -628,6 +789,67 @@ export const getDefaultQuestions = async (req: Request, res: Response) => {
   }
 };
 
+// --- Accept Message Request ---
+export const acceptChatRequest = async (req: AuthRequest, res: Response) => {
+  try {
+    const { chatId } = req.params;
+    const userId = req.user?._id;
+    if (!userId) return res.status(401).json({ message: "Unauthorized" });
+
+    const chat = await Chat.findById(chatId).populate(
+      "participants",
+      "username name companyName profilePic userType isVerified"
+    );
+    if (!chat) return res.status(404).json({ message: "Chat not found" });
+
+    const isParticipant = chat.participants.some((p: any) => toIdString(p?._id || p) === toIdString(userId));
+    if (!isParticipant) return res.status(403).json({ message: "Not authorized" });
+
+    if (String(chat.requestStatus || "none") !== "pending") {
+      return res.status(200).json(chat);
+    }
+
+    if (toIdString(chat.requestRecipient) !== toIdString(userId)) {
+      return res.status(403).json({ message: "Only the recipient can accept this request" });
+    }
+
+    chat.requestStatus = "accepted";
+    await chat.save();
+
+    return res.status(200).json(chat);
+  } catch (error) {
+    console.error("Error in acceptChatRequest:", error);
+    return res.status(500).json({ message: "Server error" });
+  }
+};
+
+// --- Block Message Request / Chat ---
+export const blockChatRequest = async (req: AuthRequest, res: Response) => {
+  try {
+    const { chatId } = req.params;
+    const userId = req.user?._id;
+    if (!userId) return res.status(401).json({ message: "Unauthorized" });
+
+    const chat = await Chat.findById(chatId).populate(
+      "participants",
+      "username name companyName profilePic userType isVerified"
+    );
+    if (!chat) return res.status(404).json({ message: "Chat not found" });
+
+    const isParticipant = chat.participants.some((p: any) => toIdString(p?._id || p) === toIdString(userId));
+    if (!isParticipant) return res.status(403).json({ message: "Not authorized" });
+
+    chat.requestStatus = "blocked";
+    chat.blockedBy = new Types.ObjectId(toIdString(userId));
+    await chat.save();
+
+    return res.status(200).json({ success: true, message: "Chat blocked" });
+  } catch (error) {
+    console.error("Error in blockChatRequest:", error);
+    return res.status(500).json({ message: "Server error" });
+  }
+};
+
 // --- Delete Chat (Soft Delete) ---
 export const deleteChat = async (req: AuthRequest, res: Response) => {
   try {
@@ -755,16 +977,20 @@ export const markMessagesRead = async (req: AuthRequest, res: Response) => {
 export const getUnreadCount = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user?._id;
+    const userIdString = toIdString(userId);
 
     const chats = await Chat.find({
       participants: userId,
       isActive: true,
-    }).select("_id chatType");
+      $or: [{ requestStatus: { $ne: "blocked" } }, { requestStatus: { $exists: false } }],
+    }).select("_id chatType requestStatus requestInitiator requestRecipient");
 
     let totalUnread = 0;
     let businessUnread = 0;
     let generalUnread = 0;
     let adminUnread = 0;
+    let requestUnread = 0;
+    let requestChats = 0;
 
     const chatIds = chats.map((chat) => chat._id);
     const unreadMap = new Map<string, number>();
@@ -793,6 +1019,16 @@ export const getUnreadCount = async (req: AuthRequest, res: Response) => {
       const unread = unreadMap.get(chat._id.toString()) || 0;
       totalUnread += unread;
 
+      const isIncomingRequest =
+        String((chat as any).requestStatus || "none") === "pending" &&
+        toIdString((chat as any).requestRecipient) === userIdString;
+
+      if (isIncomingRequest) {
+        requestUnread += unread;
+        requestChats += 1;
+        return;
+      }
+
       if (chat.chatType === "business") businessUnread += unread;
       else if (chat.chatType === "admin") adminUnread += unread;
       else generalUnread += unread;
@@ -803,6 +1039,8 @@ export const getUnreadCount = async (req: AuthRequest, res: Response) => {
       business: businessUnread,
       general: generalUnread,
       admin: adminUnread,
+      requests: requestUnread,
+      requestChats,
     });
   } catch (error) {
     console.error("Error in getUnreadCount:", error);
@@ -851,6 +1089,11 @@ export const sendOfferPrice = async (req: AuthRequest, res: Response) => {
 
     if (!isParticipant) {
       return res.status(403).json({ message: "Not authorized" });
+    }
+
+    const sendAccess = canUserSendInChat(chat, toIdString(userId));
+    if (!sendAccess.allowed) {
+      return res.status(403).json({ message: sendAccess.message || "Message request pending" });
     }
 
     // Create offer product with new price

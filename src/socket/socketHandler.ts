@@ -51,6 +51,37 @@ let ioInstance: Server | null = null;
 const READ_RECEIPT_THROTTLE_MS = 1200;
 const readReceiptThrottleMap = new Map<string, number>();
 
+const toIdString = (value: any): string => {
+  if (!value) return "";
+  if (typeof value === "string") return value;
+  if (typeof value?.toString === "function") return value.toString();
+  return String(value);
+};
+
+const canSocketUserSendInChat = (chat: any, userId?: string) => {
+  const requestStatus = String(chat?.requestStatus || "none");
+  const requestRecipient = toIdString(chat?.requestRecipient);
+  const blockedBy = toIdString(chat?.blockedBy);
+  const currentUserId = toIdString(userId);
+
+  if (!currentUserId) {
+    return { allowed: false, message: "Not authenticated" };
+  }
+
+  if (requestStatus === "blocked") {
+    if (blockedBy && blockedBy !== currentUserId) {
+      return { allowed: false, message: "You are blocked in this chat" };
+    }
+    return { allowed: false, message: "This chat is blocked" };
+  }
+
+  if (requestStatus === "pending" && requestRecipient === currentUserId) {
+    return { allowed: false, message: "Accept this message request before replying" };
+  }
+
+  return { allowed: true };
+};
+
 const shouldThrottleReadReceipt = (userId: string, chatId: string) => {
   const key = `${userId}:${chatId}`;
   const now = Date.now();
@@ -431,6 +462,12 @@ export async function initializeSocket(server: HttpServer) {
           return;
         }
 
+        const sendAccess = canSocketUserSendInChat(chat, socket.userId);
+        if (!sendAccess.allowed) {
+          socket.emit("error", { message: sendAccess.message || "Message request pending" });
+          return;
+        }
+
         const messageId = new Types.ObjectId();
         let finalInquiryId: Types.ObjectId | undefined;
 
@@ -559,20 +596,22 @@ export async function initializeSocket(server: HttpServer) {
         });
 
         // Run business auto-reply in background to keep send-message path responsive
-        void processBusinessAutoReply({
-          io,
-          chatId,
-          chat,
-          senderId: socket.userId,
-          messageType: startInquiry ? "inquiry" : messageType,
-          product,
-          startInquiry,
-          finalInquiryId,
-          activeInquiry,
-          negotiate,
-        }).catch((autoReplyError) => {
-          console.error("Auto-reply error:", autoReplyError);
-        });
+        if (String(chat.requestStatus || "none") !== "pending") {
+          void processBusinessAutoReply({
+            io,
+            chatId,
+            chat,
+            senderId: socket.userId,
+            messageType: startInquiry ? "inquiry" : messageType,
+            product,
+            startInquiry,
+            finalInquiryId,
+            activeInquiry,
+            negotiate,
+          }).catch((autoReplyError) => {
+            console.error("Auto-reply error:", autoReplyError);
+          });
+        }
       } catch (error) {
         console.error("Error sending message:", error);
         socket.emit("error", { message: "Failed to send message" });

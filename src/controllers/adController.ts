@@ -23,6 +23,7 @@ export const createAd = async (req: AuthRequest, res: Response) => {
       description,
       linkUrl,
       type,
+      priority,
       startDate,
       endDate
     } = req.body;
@@ -71,6 +72,7 @@ export const createAd = async (req: AuthRequest, res: Response) => {
       imageUrl,
       linkUrl,
       type,
+      priority: Number.isFinite(Number(priority)) ? Math.max(1, Number(priority)) : 999,
       startDate: new Date(startDate),
       endDate: new Date(endDate),
       payment: {
@@ -194,6 +196,10 @@ export const updateAd = async (req: AuthRequest, res: Response) => {
     // Parse dates if provided
     if (updates.startDate) updates.startDate = new Date(updates.startDate);
     if (updates.endDate) updates.endDate = new Date(updates.endDate);
+    if (updates.priority !== undefined) {
+      const parsedPriority = Number(updates.priority);
+      updates.priority = Number.isFinite(parsedPriority) ? Math.max(1, parsedPriority) : 999;
+    }
 
     const ad = await Ad.findByIdAndUpdate(
       id,
@@ -432,7 +438,8 @@ export const getActiveAds = async (req: Request, res: Response) => {
     if (type) query.type = type;
 
     const ads = await Ad.find(query)
-      .select("_id title description imageUrl linkUrl type")
+      .select("_id title description imageUrl linkUrl type priority")
+      .sort({ priority: 1, createdAt: 1 })
       .lean();
 
     res.json(ads);

@@ -223,6 +223,7 @@ const sendOrderUpdateMessage = async (
     estimatedDelivery?: Date;
     isDeliveryConfirmation?: boolean;
     itemName?: string;
+    note?: string;
   }
 ): Promise<void> => {
   try {
@@ -258,7 +259,9 @@ const sendOrderUpdateMessage = async (
           content = `📍 Your order ${orderLabel} is out for delivery! It should arrive today.`;
           break;
         case "delivered":
-          content = `🎉 Your order ${orderLabel} has been delivered! Thank you for shopping with us.`;
+          content = previousStatus === "disputed"
+            ? `Dispute for ${orderLabel} has been reviewed and closed by the seller.`
+            : `🎉 Your order ${orderLabel} has been delivered! Thank you for shopping with us.`;
           break;
         case "cancelled":
           content = `❌ Your order ${orderLabel} has been cancelled.`;
@@ -266,9 +269,18 @@ const sendOrderUpdateMessage = async (
         case "disputed":
           content = `⚠️ A dispute has been raised for order ${orderLabel}. Our team will review this shortly.`;
           break;
+        case "refunded":
+          content = `Refund has been processed for ${orderLabel}.`;
+          break;
         default:
           content = `📋 ${orderLabel} status updated to ${ORDER_STATUS_LABELS[newStatus]}.`;
       }
+    }
+
+    const trimmedNote =
+      typeof options?.note === "string" ? options.note.trim() : "";
+    if (trimmedNote && messageType === "order-update") {
+      content = `${content}\nNote: ${trimmedNote}`;
     }
 
     const newMessage: IMessage = {
@@ -938,9 +950,12 @@ export const getSellerOrders = async (req: AuthRequest, res: Response) => {
       processing: 0,
       shipping_initiated: 0,
       shipped: 0,
+      out_for_delivery: 0,
       delivered: 0,
       cancelled: 0,
       disputed: 0,
+      refund_requested: 0,
+      refunded: 0,
       totalRevenue: 0,
       totalOrders: total,
     };
@@ -999,7 +1014,7 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
       out_for_delivery: ["delivered"],
       delivered: ["disputed", "refund_requested"],
       cancelled: [],
-      disputed: ["refunded"],
+      disputed: ["refunded", "delivered"],
       refund_requested: ["refunded"],
       refunded: [],
     };
@@ -1034,12 +1049,22 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
     if (trackingLink) (order as any).trackingLink = trackingLink;
     if (shippingCarrier) order.shippingCarrier = shippingCarrier;
     if (estimatedDelivery) order.estimatedDelivery = new Date(estimatedDelivery);
-    if (status === "delivered") order.deliveredAt = new Date();
+    if (status === "delivered" && !order.deliveredAt) order.deliveredAt = new Date();
 
     // Update payment status for COD on delivery
     if (status === "delivered" && order.paymentMethod === "cod") {
       order.paymentStatus = "completed";
       order.paidAt = new Date();
+    }
+
+    if (status === "refunded") {
+      order.paymentStatus = "refunded";
+      if (!order.refundAmount) {
+        order.refundAmount = order.totalAmount;
+      }
+      if (!order.refundReason) {
+        order.refundReason = note || "Refund processed by seller";
+      }
     }
 
     await order.save();
@@ -1058,13 +1083,17 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
         trackingNumber: order.trackingNumber,
         trackingLink: (order as any).trackingLink,
         estimatedDelivery: order.estimatedDelivery,
-        isDeliveryConfirmation: status === "delivered" || status === "out_for_delivery",
+        isDeliveryConfirmation: status === "delivered" && previousStatus !== "disputed",
         itemName: itemLabel,
+        note:
+          typeof note === "string" && note.trim().length > 0
+            ? note.trim()
+            : undefined,
       }
     );
 
     // Send dispute window message when order is delivered (auto-deletes after 24h)
-    if (status === "delivered") {
+    if (status === "delivered" && previousStatus !== "disputed") {
       await sendDisputeWindowMessage(
         new mongoose.Types.ObjectId(sellerId),
         order.buyer,
