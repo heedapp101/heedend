@@ -751,6 +751,11 @@ export const updateAwardPaymentMethod = async (req: AuthRequest, res: Response) 
       .select("_id type targetPost awardedBy")
       .lean();
 
+    const hasPaidAwardHistory = await Award.exists({
+      targetUser: user._id,
+      status: "paid",
+    });
+
     if (pendingAwards.length > 0) {
       const pendingAwardIds = pendingAwards.map((award: any) => award._id);
       const pendingPostIds = pendingAwards
@@ -791,16 +796,18 @@ export const updateAwardPaymentMethod = async (req: AuthRequest, res: Response) 
         )
       );
 
-      await Promise.all(
-        adminIds.map((adminId) =>
-          sendAwardChatMessage({
-            adminId,
-            userId: user._id,
-            senderId: user._id,
-            content: "I have updated my payment details for the award. Please verify and complete the payment.",
-          })
-        )
-      );
+      if (!hasPaidAwardHistory) {
+        await Promise.all(
+          adminIds.map((adminId) =>
+            sendAwardChatMessage({
+              adminId,
+              userId: user._id,
+              senderId: user._id,
+              content: "I have updated my payment details for the award. Please verify and complete the payment.",
+            })
+          )
+        );
+      }
     }
 
     res.json({

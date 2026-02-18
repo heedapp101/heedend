@@ -149,6 +149,164 @@ const emitRealtimeChatEvent = (
   });
 };
 
+const getPrimaryAdminUser = async () => {
+  return await User.findOne({
+    userType: "admin",
+    isDeleted: { $ne: true },
+  })
+    .select("_id")
+    .sort({ createdAt: 1 })
+    .lean();
+};
+
+const getOrCreateSupportChatWithAdmin = async (
+  userId: Types.ObjectId,
+  adminId: Types.ObjectId
+) => {
+  let chat = await Chat.findOne({
+    participants: { $all: [userId, adminId] },
+    chatType: "admin",
+    isActive: true,
+  }).populate("participants", "username name companyName profilePic userType isVerified isDeleted");
+
+  if (!chat) {
+    chat = new Chat({
+      participants: [userId, adminId],
+      chatType: "admin",
+      requestStatus: "accepted",
+      requestInitiator: userId,
+      requestRecipient: adminId,
+      requestSource: "profile",
+      isActive: true,
+    });
+    await chat.save();
+    chat = await Chat.findById(chat._id).populate(
+      "participants",
+      "username name companyName profilePic userType isVerified isDeleted"
+    );
+  }
+
+  return chat;
+};
+
+// --- Support: Open/Get chat with admin ---
+export const openSupportChat = async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user?._id;
+    if (!userId) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    if (req.user?.userType === "admin") {
+      return res.status(400).json({ message: "Admins already have direct support chat access" });
+    }
+
+    const admin = await getPrimaryAdminUser();
+    if (!admin?._id) {
+      return res.status(503).json({ message: "Support is currently unavailable. Try again later." });
+    }
+
+    const userObjectId = new Types.ObjectId(toIdString(userId));
+    const adminObjectId = new Types.ObjectId(toIdString(admin._id));
+    const chat = await getOrCreateSupportChatWithAdmin(userObjectId, adminObjectId);
+
+    if (!chat) {
+      return res.status(500).json({ message: "Failed to open support chat" });
+    }
+
+    return res.status(200).json({
+      success: true,
+      chatId: chat._id,
+      chat,
+    });
+  } catch (error) {
+    console.error("Error in openSupportChat:", error);
+    return res.status(500).json({ message: "Server error" });
+  }
+};
+
+// --- Support: Seller ad campaign request -> support chat message ---
+export const requestSupportAdCampaign = async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user?._id;
+    if (!userId) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    if (req.user?.userType === "admin") {
+      return res.status(400).json({ message: "Admins cannot create ad campaign support requests" });
+    }
+
+    const { type, duration, budget, message } = req.body || {};
+    const normalizedType =
+      String(type || "in-feed").trim().toLowerCase() === "banner" ? "banner" : "in-feed";
+    const normalizedDuration = String(duration || "1_week").trim();
+    const normalizedMessage = String(message || "").trim();
+    const numericBudget = Number(budget);
+
+    if (!normalizedMessage) {
+      return res.status(400).json({ message: "Message is required" });
+    }
+    if (!Number.isFinite(numericBudget) || numericBudget <= 0) {
+      return res.status(400).json({ message: "Budget must be a positive number" });
+    }
+
+    const admin = await getPrimaryAdminUser();
+    if (!admin?._id) {
+      return res.status(503).json({ message: "Support is currently unavailable. Try again later." });
+    }
+
+    const userObjectId = new Types.ObjectId(toIdString(userId));
+    const adminObjectId = new Types.ObjectId(toIdString(admin._id));
+    const chat = await getOrCreateSupportChatWithAdmin(userObjectId, adminObjectId);
+
+    if (!chat) {
+      return res.status(500).json({ message: "Failed to open support chat" });
+    }
+
+    const contentLines = [
+      "Ad Campaign Request",
+      `Type: ${normalizedType}`,
+      `Duration: ${normalizedDuration}`,
+      `Budget: INR ${numericBudget.toLocaleString("en-IN")}`,
+      "Message:",
+      normalizedMessage,
+    ];
+    const supportMessageText = contentLines.join("\n");
+
+    const newMessage: IMessage = {
+      _id: new Types.ObjectId(),
+      chat: chat._id as any,
+      sender: new Types.ObjectId(userObjectId),
+      content: supportMessageText,
+      messageType: "text",
+      isRead: false,
+      createdAt: new Date(),
+    } as IMessage;
+
+    const savedMessageDoc = await Message.create(newMessage);
+
+    chat.lastMessage = {
+      content: "Ad campaign request sent",
+      sender: new Types.ObjectId(userObjectId),
+      createdAt: new Date(),
+    };
+    await chat.save();
+
+    emitRealtimeChatEvent(chat, toIdString(userObjectId), savedMessageDoc.toObject(), null);
+
+    return res.status(201).json({
+      success: true,
+      message: "Ad campaign request sent to support chat",
+      chatId: chat._id,
+      supportMessage: savedMessageDoc,
+    });
+  } catch (error) {
+    console.error("Error in requestSupportAdCampaign:", error);
+    return res.status(500).json({ message: "Server error" });
+  }
+};
+
 // --- Get or Create Chat ---
 export const getOrCreateChat = async (req: AuthRequest, res: Response) => {
   try {

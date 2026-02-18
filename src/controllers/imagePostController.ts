@@ -439,61 +439,72 @@ export const toggleLikePost = async (req: AuthRequest, res: Response) => {
 
     const userId = req.user._id.toString();
     const source = req.query.source as string;
+    const mode = String(req.query.mode || "").toLowerCase();
+    const likeOnly = mode === "like" || mode === "like_only";
+    let likeAddedNow = false;
 
-    const existingLike = await PostLike.findOne({ post: post._id, user: req.user._id })
-      .select("_id")
-      .lean();
-
-    let isLiked = false;
-
-    if (existingLike) {
-      await PostLike.deleteOne({ _id: existingLike._id });
-      await ImagePost.updateOne(
-        { _id: post._id },
-        { $inc: { likesCount: -1 }, $max: { likesCount: 0 } }
+    if (likeOnly) {
+      const likeResult = await PostLike.updateOne(
+        { post: post._id, user: req.user._id },
+        { $setOnInsert: { post: post._id, user: req.user._id } },
+        { upsert: true }
       );
-      isLiked = false;
+      likeAddedNow = (likeResult.upsertedCount ?? 0) > 0;
     } else {
-      try {
-        await PostLike.create({ post: post._id, user: req.user._id });
-        await ImagePost.updateOne({ _id: post._id }, { $inc: { likesCount: 1 } });
-        isLiked = true;
-      } catch (err: any) {
-        if (err?.code === 11000) {
-          isLiked = true;
-        } else {
-          throw err;
-        }
+      // Toggle mode: remove all likes by this user (dedup-safe). If nothing removed, add one.
+      const unlikeResult = await PostLike.deleteMany({ post: post._id, user: req.user._id });
+      const removedAny = (unlikeResult.deletedCount ?? 0) > 0;
+
+      if (!removedAny) {
+        const likeResult = await PostLike.updateOne(
+          { post: post._id, user: req.user._id },
+          { $setOnInsert: { post: post._id, user: req.user._id } },
+          { upsert: true }
+        );
+        likeAddedNow = (likeResult.upsertedCount ?? 0) > 0;
+      }
+    }
+
+    // Always compute canonical state from like records to prevent drift/spam.
+    const [isLikedDoc, uniqueLikeCountAgg] = await Promise.all([
+      PostLike.exists({ post: post._id, user: req.user._id }),
+      PostLike.aggregate([
+        { $match: { post: post._id } },
+        { $group: { _id: "$user" } },
+        { $count: "total" },
+      ]),
+    ]);
+    const isLiked = Boolean(isLikedDoc);
+    const likesCount = uniqueLikeCountAgg[0]?.total || 0;
+    await ImagePost.updateOne({ _id: post._id }, { $set: { likesCount } });
+
+    if (likeAddedNow) {
+      // 🚀 BUFFERED: Add Like Weight (batched every 30s)
+      if (post.tags && post.tags.length > 0) {
+        interestBuffer.add(req.user._id.toString(), post.tags, INTEREST_WEIGHTS.LIKE);
       }
 
-      if (isLiked) {
-        // 🚀 BUFFERED: Add Like Weight (batched every 30s)
-        if (post.tags && post.tags.length > 0) {
-          interestBuffer.add(req.user._id.toString(), post.tags, INTEREST_WEIGHTS.LIKE);
-        }
+      // 📊 Track analytics for likes (fire-and-forget, no await)
+      if (source && ["recommended", "explore", "trending", "search", "profile"].includes(source)) {
+        RecommendationAnalytics.create({
+          userId: req.user._id,
+          postId: post._id,
+          source: source as any,
+          action: "like",
+          clickedAt: new Date(),
+        }).catch(err => console.error("Analytics tracking error:", err));
+      }
 
-        // 📊 Track analytics for likes (fire-and-forget, no await)
-        if (source && ["recommended", "explore", "trending", "search", "profile"].includes(source)) {
-          RecommendationAnalytics.create({
-            userId: req.user._id,
-            postId: post._id,
-            source: source as any,
-            action: "like",
-            clickedAt: new Date(),
-          }).catch(err => console.error("Analytics tracking error:", err));
-        }
-
-        // 🔔 Send notification to post owner (if not self-like)
-        const postOwnerId = post.user.toString();
-        if (postOwnerId !== userId) {
-          await notifyLike(
-            postOwnerId,
-            userId,
-            req.user.name || req.user.username || "User",
-            post._id.toString(),
-            post.title
-          );
-        }
+      // 🔔 Send notification to post owner (if not self-like)
+      const postOwnerId = post.user.toString();
+      if (postOwnerId !== userId) {
+        await notifyLike(
+          postOwnerId,
+          userId,
+          req.user.name || req.user.username || "User",
+          post._id.toString(),
+          post.title
+        );
       }
     }
 
@@ -506,7 +517,7 @@ export const toggleLikePost = async (req: AuthRequest, res: Response) => {
 
     res.json({
       ...populated.toObject(),
-      likes: (populated as any).likesCount || 0,
+      likes: likesCount,
       isLiked,
     });
 

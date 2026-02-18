@@ -13,6 +13,8 @@ import {
   markMessagesRead,
   getUnreadCount,
   sendOfferPrice,
+  openSupportChat,
+  requestSupportAdCampaign,
 } from "../controllers/chatController.js";
 import { requireAuth } from "../middleware/authMiddleware.js";
 import { adminMiddleware } from "../middleware/roleMiddleware.js";
@@ -33,6 +35,10 @@ router.get("/unread", getUnreadCount);
 
 // Get or create chat with another user
 router.post("/create", getOrCreateChat);
+
+// Seller/business support helpers
+router.post("/support/open", openSupportChat);
+router.post("/support/ad-campaign", requestSupportAdCampaign);
 
 // --- Admin Routes ---
 // Keep these before dynamic :chatId routes

@@ -1208,9 +1208,22 @@ export const awardPost = async (req: Request, res: Response) => {
       return res.status(404).json({ message: "Post owner not found" });
     }
 
+    const existingPaidAward = await Award.findOne({
+      targetUser: targetUser._id,
+      status: "paid",
+    })
+      .select("_id")
+      .lean();
+    if (existingPaidAward) {
+      return res.status(400).json({
+        message:
+          "This account has already received an award payment. Another payment request is blocked.",
+      });
+    }
+
     const existingActiveAward = await Award.findOne({
       targetUser: targetUser._id,
-      status: { $in: ["pending", "approved", "paid"] },
+      status: { $in: ["pending", "approved"] },
     })
       .select("_id status")
       .lean();
@@ -1344,9 +1357,22 @@ export const awardUser = async (req: Request, res: Response) => {
       return res.status(404).json({ message: "User not found" });
     }
 
+    const existingPaidAward = await Award.findOne({
+      targetUser: user._id,
+      status: "paid",
+    })
+      .select("_id")
+      .lean();
+    if (existingPaidAward) {
+      return res.status(400).json({
+        message:
+          "This account has already received an award payment. Another payment request is blocked.",
+      });
+    }
+
     const existingActiveAward = await Award.findOne({
       targetUser: user._id,
-      status: { $in: ["pending", "approved", "paid"] },
+      status: { $in: ["pending", "approved"] },
     })
       .select("_id status")
       .lean();
@@ -1653,6 +1679,13 @@ export const deleteAward = async (req: Request, res: Response) => {
     const award = await Award.findById(awardId);
     if (!award) {
       return res.status(404).json({ message: "Award not found" });
+    }
+
+    if (award.status === "paid") {
+      return res.status(400).json({
+        message:
+          "Paid awards cannot be deleted. This prevents duplicate payment requests for the same account.",
+      });
     }
 
     // Remove award flags from post/user
