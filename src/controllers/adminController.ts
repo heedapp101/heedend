@@ -30,6 +30,55 @@ const signPrivateUrl = (url: string) => {
     return url; // Fallback if URL parsing fails
   }
 };
+
+type AwardPaymentInput = {
+  type: "upi" | "phone";
+  value: string;
+};
+
+const parseAwardPaymentInput = (
+  paymentMethodType?: unknown,
+  paymentMethodValue?: unknown
+): { method?: AwardPaymentInput; error?: string } => {
+  const hasType = typeof paymentMethodType === "string" && paymentMethodType.trim().length > 0;
+  const hasValue = typeof paymentMethodValue === "string" && paymentMethodValue.trim().length > 0;
+
+  if (!hasType && !hasValue) return {};
+  if (!hasType || !hasValue) {
+    return { error: "Both payment method type and value are required" };
+  }
+
+  const type = String(paymentMethodType).trim().toLowerCase();
+  const rawValue = String(paymentMethodValue).trim();
+
+  if (type !== "upi" && type !== "phone") {
+    return { error: "Payment method type must be 'upi' or 'phone'" };
+  }
+
+  if (type === "upi") {
+    if (!rawValue.includes("@")) {
+      return { error: "Invalid UPI ID format (example: name@bank)" };
+    }
+    return {
+      method: {
+        type: "upi",
+        value: rawValue,
+      },
+    };
+  }
+
+  const phoneDigits = rawValue.replace(/\D/g, "");
+  if (phoneDigits.length !== 10) {
+    return { error: "Phone number must be 10 digits" };
+  }
+
+  return {
+    method: {
+      type: "phone",
+      value: phoneDigits,
+    },
+  };
+};
 export const getPendingApprovals = async (req: Request, res: Response) => {
   try {
     const pendingUsers = await User.find({ 
@@ -519,15 +568,17 @@ export const getAwardCandidates = async (req: Request, res: Response) => {
       match.$and.push({ $or: [{ isArchived: false }, { isArchived: { $exists: false } }] });
     }
 
-    const candidates = await ImagePost.aggregate([
+    const topPosts = await ImagePost.aggregate([
       { $match: match },
       {
         $addFields: {
           likesCount: { $ifNull: ["$likesCount", 0] },
+          commentsCount: { $ifNull: ["$commentsCount", 0] },
           engagementScore: {
             $add: [
               { $ifNull: ["$views", 0] },
               { $multiply: [{ $ifNull: ["$likesCount", 0] }, 3] },
+              { $multiply: [{ $ifNull: ["$commentsCount", 0] }, 2] },
             ],
           },
         },
@@ -551,20 +602,112 @@ export const getAwardCandidates = async (req: Request, res: Response) => {
           tags: 1,
           views: 1,
           likesCount: 1,
+          commentsCount: 1,
+          isAwarded: 1,
           createdAt: 1,
           engagementScore: 1,
           "user._id": 1,
+          "user.name": 1,
           "user.username": 1,
           "user.userType": 1,
           "user.profilePic": 1,
+          "user.awardPaymentMethod": 1,
+          "user.isAwarded": 1,
+        },
+      },
+    ]);
+
+    const userMatch: any = {
+      isDeleted: { $ne: true },
+      userType: { $ne: "admin" },
+    };
+    if (!includeAwarded) {
+      userMatch.isAwarded = { $ne: true };
+    }
+
+    const topUsers = await User.aggregate([
+      { $match: userMatch },
+      {
+        $lookup: {
+          from: "imageposts",
+          let: { userId: "$_id" },
+          pipeline: [
+            {
+              $match: {
+                $expr: { $eq: ["$user", "$$userId"] },
+                createdAt: { $gte: startDate },
+                ...(tag ? { tags: { $regex: new RegExp(tag, "i") } } : {}),
+                ...(includeHidden
+                  ? {}
+                  : {
+                      adminHidden: { $ne: true },
+                      isArchived: { $ne: true },
+                    }),
+              },
+            },
+            {
+              $project: {
+                views: 1,
+                likesCount: { $ifNull: ["$likesCount", 0] },
+                commentsCount: { $ifNull: ["$commentsCount", 0] },
+              },
+            },
+          ],
+          as: "recentPosts",
+        },
+      },
+      {
+        $addFields: {
+          postCount: { $size: "$recentPosts" },
+          totalViews: { $sum: "$recentPosts.views" },
+          totalLikes: { $sum: "$recentPosts.likesCount" },
+          totalComments: { $sum: "$recentPosts.commentsCount" },
+        },
+      },
+      {
+        $addFields: {
+          engagementScore: {
+            $add: [
+              { $ifNull: ["$totalViews", 0] },
+              { $multiply: [{ $ifNull: ["$totalLikes", 0] }, 3] },
+              { $multiply: [{ $ifNull: ["$totalComments", 0] }, 2] },
+            ],
+          },
+        },
+      },
+      { $match: { postCount: { $gt: 0 } } },
+      { $sort: { engagementScore: -1, createdAt: -1 } },
+      { $limit: limit },
+      {
+        $project: {
+          _id: 1,
+          name: 1,
+          username: 1,
+          userType: 1,
+          profilePic: 1,
+          isAwarded: 1,
+          awardPaymentMethod: 1,
+          postCount: 1,
+          totalViews: 1,
+          totalLikes: 1,
+          totalComments: 1,
+          engagementScore: 1,
+          couponScore: "$engagementScore",
         },
       },
     ]);
 
     res.status(200).json({
       windowDays: days,
-      total: candidates.length,
-      candidates,
+      total: topPosts.length + topUsers.length,
+      totals: {
+        posts: topPosts.length,
+        users: topUsers.length,
+      },
+      topPosts,
+      topUsers,
+      // Backward compatibility with older consumers
+      candidates: topPosts,
     });
   } catch (error: any) {
     console.error("Get Award Candidates Error:", error);
@@ -1006,7 +1149,15 @@ export const awardPost = async (req: Request, res: Response) => {
   try {
     const adminId = (req as any).user._id;
     const { postId } = req.params;
-    const { message, amount, showInFeed, priority, sendNotification } = req.body;
+    const {
+      message,
+      amount,
+      showInFeed,
+      priority,
+      sendNotification,
+      paymentMethodType,
+      paymentMethodValue,
+    } = req.body;
 
     const post = await ImagePost.findById(postId).populate("user", "name username awardPaymentMethod pushTokens");
     if (!post) {
@@ -1018,13 +1169,30 @@ export const awardPost = async (req: Request, res: Response) => {
       return res.status(404).json({ message: "Post owner not found" });
     }
 
+    const paymentInput = parseAwardPaymentInput(paymentMethodType, paymentMethodValue);
+    if (paymentInput.error) {
+      return res.status(400).json({ message: paymentInput.error });
+    }
+    if (paymentInput.method) {
+      targetUser.awardPaymentMethod = paymentInput.method;
+      await targetUser.save();
+    }
+
+    let parsedAmount = 0;
+    if (amount !== undefined) {
+      parsedAmount = Number(amount);
+      if (!Number.isFinite(parsedAmount) || parsedAmount < 0) {
+        return res.status(400).json({ message: "Amount must be a non-negative number" });
+      }
+    }
+
     // Check if user has payment method
     const hasPaymentMethod = targetUser.awardPaymentMethod?.type && targetUser.awardPaymentMethod?.value;
 
     // Update post award fields
     post.isAwarded = true;
     post.awardMessage = message || "This post has exceptional engagement!";
-    post.awardAmount = amount || 0;
+    post.awardAmount = parsedAmount || 0;
     post.awardedAt = new Date();
     post.awardStatus = hasPaymentMethod ? "approved" : "pending";
     post.awardShowInFeed = showInFeed !== false;
@@ -1054,11 +1222,11 @@ export const awardPost = async (req: Request, res: Response) => {
         type: "award",
         title: "🏆 Congratulations! Your post has been awarded!",
         message: post.awardMessage + (amount > 0 ? ` You'll receive ₹${amount}!` : ""),
-        data: {
-          postId: post._id,
-          awardId: award._id,
-          amount: post.awardAmount,
-          needsPaymentMethod: !hasPaymentMethod,
+      data: {
+        postId: post._id,
+        awardId: award._id,
+        amount: post.awardAmount,
+        needsPaymentMethod: !hasPaymentMethod,
         },
       });
     }
@@ -1076,6 +1244,7 @@ export const awardPost = async (req: Request, res: Response) => {
         awardStatus: post.awardStatus,
       },
       userHasPaymentMethod: hasPaymentMethod,
+      paymentMethod: hasPaymentMethod ? targetUser.awardPaymentMethod : null,
     });
   } catch (error: any) {
     console.error("Award Post Error:", error);
@@ -1088,11 +1257,35 @@ export const awardUser = async (req: Request, res: Response) => {
   try {
     const adminId = (req as any).user._id;
     const { userId } = req.params;
-    const { message, amount, showInFeed, priority, sendNotification } = req.body;
+    const {
+      message,
+      amount,
+      showInFeed,
+      priority,
+      sendNotification,
+      paymentMethodType,
+      paymentMethodValue,
+    } = req.body;
 
     const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({ message: "User not found" });
+    }
+
+    const paymentInput = parseAwardPaymentInput(paymentMethodType, paymentMethodValue);
+    if (paymentInput.error) {
+      return res.status(400).json({ message: paymentInput.error });
+    }
+    if (paymentInput.method) {
+      user.awardPaymentMethod = paymentInput.method;
+    }
+
+    let parsedAmount = 0;
+    if (amount !== undefined) {
+      parsedAmount = Number(amount);
+      if (!Number.isFinite(parsedAmount) || parsedAmount < 0) {
+        return res.status(400).json({ message: "Amount must be a non-negative number" });
+      }
     }
 
     const hasPaymentMethod = user.awardPaymentMethod?.type && user.awardPaymentMethod?.value;
@@ -1100,7 +1293,7 @@ export const awardUser = async (req: Request, res: Response) => {
     // Update user award fields
     user.isAwarded = true;
     user.userAwardMessage = message || "This account has exceptional engagement!";
-    user.userAwardAmount = amount || 0;
+    user.userAwardAmount = parsedAmount || 0;
     user.userAwardedAt = new Date();
     user.userAwardStatus = hasPaymentMethod ? "approved" : "pending";
     user.userAwardShowInFeed = showInFeed !== false;
@@ -1141,6 +1334,7 @@ export const awardUser = async (req: Request, res: Response) => {
       message: "User awarded successfully",
       award,
       userHasPaymentMethod: hasPaymentMethod,
+      paymentMethod: hasPaymentMethod ? user.awardPaymentMethod : null,
     });
   } catch (error: any) {
     console.error("Award User Error:", error);
@@ -1164,7 +1358,14 @@ export const getAllAwards = async (req: Request, res: Response) => {
 
     const [awards, total] = await Promise.all([
       Award.find(filter)
-        .populate("targetPost", "title images")
+        .populate({
+          path: "targetPost",
+          select: "title images user",
+          populate: {
+            path: "user",
+            select: "name username profilePic awardPaymentMethod",
+          },
+        })
         .populate("targetUser", "name username profilePic awardPaymentMethod")
         .populate("awardedBy", "name username")
         .sort({ createdAt: -1 })

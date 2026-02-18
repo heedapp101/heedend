@@ -31,8 +31,39 @@ export const getNotifications = async (req: AuthRequest, res: Response) => {
       getUnreadCount(req.user._id.toString()),
     ]);
 
+    const normalizedNotifications = notifications.map((notification: any) => {
+      const postData =
+        notification?.post && typeof notification.post === "object"
+          ? notification.post
+          : null;
+      const postTitle =
+        typeof postData?.title === "string" ? postData.title.trim() : "";
+      const postIdFromRelation = postData?._id ? String(postData._id) : "";
+      const postIdFromMetadata = notification?.metadata?.postId
+        ? String(notification.metadata.postId)
+        : "";
+      const fallbackPostId =
+        typeof notification?.post === "string" ? notification.post : "";
+      const postId = postIdFromRelation || postIdFromMetadata || fallbackPostId;
+
+      let displayMessage =
+        typeof notification?.message === "string" ? notification.message : "";
+      if (postTitle) {
+        if (postId && displayMessage.includes(postId)) {
+          displayMessage = displayMessage.split(postId).join(postTitle);
+        } else if (!displayMessage.toLowerCase().includes(postTitle.toLowerCase())) {
+          displayMessage = `${displayMessage} (${postTitle})`;
+        }
+      }
+
+      return {
+        ...notification,
+        displayMessage,
+      };
+    });
+
     res.json({
-      notifications,
+      notifications: normalizedNotifications,
       pagination: {
         page: Number(page),
         limit: Number(limit),

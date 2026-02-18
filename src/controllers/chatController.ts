@@ -267,7 +267,11 @@ export const getUserChats = async (req: AuthRequest, res: Response) => {
     };
 
     if (type && ["general", "business", "admin"].includes(type as string)) {
-      query.chatType = type;
+      if (type === "business" && req.user?.userType === "business") {
+        query.chatType = { $in: ["business", "admin"] };
+      } else {
+        query.chatType = type;
+      }
     }
 
     const userIdString = toIdString(userId);
@@ -1158,4 +1162,3 @@ export const sendOfferPrice = async (req: AuthRequest, res: Response) => {
     return res.status(500).json({ message: "Server error" });
   }
 };
-
