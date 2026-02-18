@@ -1294,7 +1294,7 @@ export const awardPost = async (req: Request, res: Response) => {
       userId: targetUser._id,
       senderId: adminId,
       content: shouldWaitForPaymentMethod
-        ? `Award update: Your post "${post.title || "Post"}" was awarded${post.awardAmount > 0 ? ` for Rs ${post.awardAmount}` : ""}. Please add or update your payment details so we can send money.`
+        ? `Award update: Your post "${post.title || "Post"}" was awarded${post.awardAmount > 0 ? ` for Rs ${post.awardAmount}` : ""}. Please add or update your payment details so we can send money. Payment method can be updated from your profile settings under "Award Payment Methods".`
         : `Award update: Your post "${post.title || "Post"}" was awarded${post.awardAmount > 0 ? ` for Rs ${post.awardAmount}` : ""}. Payment will be processed by admin.`,
     });
 
@@ -1425,7 +1425,7 @@ export const awardUser = async (req: Request, res: Response) => {
       userId: user._id,
       senderId: adminId,
       content: shouldWaitForPaymentMethod
-        ? `Award update: You were awarded${user.userAwardAmount > 0 ? ` Rs ${user.userAwardAmount}` : ""}. Please add or update your payment details so we can send money.`
+        ? `Award update: You were awarded${user.userAwardAmount > 0 ? ` Rs ${user.userAwardAmount}` : ""}. Please add or update your payment details so we can send money. Payment method can be updated from your profile settings under "Award Payment Methods".`
         : `Award update: You were awarded${user.userAwardAmount > 0 ? ` Rs ${user.userAwardAmount}` : ""}. Payment will be processed by admin.`,
     });
 

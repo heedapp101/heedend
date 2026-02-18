@@ -2,6 +2,7 @@
 import ImagePost from "../models/ImagePost.js";
 import { generateTagsFromImage } from "../utils/geminiVision.js";
 import { tagQueueConnection } from "../utils/tagQueue.js";
+import { logError } from "../utils/emailService.js";
 
 const QUEUE_NAME = "tag-generation";
 
@@ -38,6 +39,9 @@ export function initializeTagWorker() {
       try {
         const imageBuffer = await fetchImageBuffer(imageUrl);
         const tags = await generateTagsFromImage(imageBuffer);
+        if (tags.length === 0) {
+          throw new Error("Gemini generated no tags");
+        }
 
         await ImagePost.findByIdAndUpdate(postId, {
           $addToSet: { tags: { $each: tags } },
@@ -49,13 +53,37 @@ export function initializeTagWorker() {
         return { postId, tags, count: tags.length };
       } catch (error: any) {
         const attempts = job.opts.attempts ?? 1;
-        const isFinalAttempt = job.attemptsMade + 1 >= attempts;
+        const attemptsMade = job.attemptsMade + 1;
+        const isFinalAttempt = attemptsMade >= attempts;
+        const errorMessage = error?.message || String(error);
 
         if (isFinalAttempt) {
           await ImagePost.findByIdAndUpdate(postId, {
             tagGenerationStatus: "failed",
-            tagGenerationError: error?.message || String(error),
+            tagGenerationError: errorMessage,
           });
+
+          try {
+            await logError({
+              message: `Image tagging failed for post ${postId}: ${errorMessage}`,
+              source: "feature",
+              severity: "medium",
+              errorCode: "IMAGE_TAGGING_FAILED",
+              endpoint: "/workers/tag-generation",
+              method: "WORKER",
+              metadata: {
+                feature: "image-tagging",
+                postId,
+                imageUrl,
+                queueJobId: job.id,
+                attemptsMade,
+                maxAttempts: attempts,
+              },
+              stack: error?.stack,
+            });
+          } catch (logErr) {
+            console.error("Failed to log image tagging failure:", logErr);
+          }
         }
 
         throw error;

@@ -5,7 +5,7 @@ export interface IEmailRecipient {
   name: string;
   active: boolean;
   notifyOn: ("critical" | "high" | "medium" | "low")[];
-  sources: ("mongodb" | "cloudflare" | "google-vision" | "gemini-vision" | "auth" | "payment" | "socket" | "api" | "system" | "all")[];
+  sources: ("mongodb" | "cloudflare" | "google-vision" | "gemini-vision" | "feature" | "auth" | "payment" | "socket" | "api" | "system" | "all")[];
   addedAt: Date;
 }
 
@@ -56,7 +56,7 @@ const emailRecipientSchema = new Schema<IEmailRecipient>({
   }],
   sources: [{
     type: String,
-    enum: ["mongodb", "cloudflare", "google-vision", "gemini-vision", "auth", "payment", "socket", "api", "system", "all"],
+    enum: ["mongodb", "cloudflare", "google-vision", "gemini-vision", "feature", "auth", "payment", "socket", "api", "system", "all"],
     default: ["all"],
   }],
   addedAt: { type: Date, default: Date.now },

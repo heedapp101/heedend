@@ -2,7 +2,7 @@ import { Schema, Document, model, Types } from "mongoose";
 
 // Error severity levels
 export type ErrorSeverity = "low" | "medium" | "high" | "critical";
-export type ErrorSource = "mongodb" | "cloudflare" | "google-vision" | "gemini-vision" | "auth" | "payment" | "socket" | "api" | "system" | "unknown";
+export type ErrorSource = "mongodb" | "cloudflare" | "google-vision" | "gemini-vision" | "feature" | "auth" | "payment" | "socket" | "api" | "system" | "unknown";
 
 export interface IErrorLog extends Document {
   // Error identification
@@ -65,7 +65,7 @@ const errorLogSchema = new Schema<IErrorLog>(
     },
     source: {
       type: String,
-      enum: ["mongodb", "cloudflare", "google-vision", "gemini-vision", "auth", "payment", "socket", "api", "system", "unknown"],
+      enum: ["mongodb", "cloudflare", "google-vision", "gemini-vision", "feature", "auth", "payment", "socket", "api", "system", "unknown"],
       default: "unknown",
       index: true,
     },

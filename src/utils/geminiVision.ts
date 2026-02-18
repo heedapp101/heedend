@@ -11,6 +11,32 @@ function getClient(): GoogleGenerativeAI {
   return genAI;
 }
 
+const logGeminiVisionError = async (
+  message: string,
+  errorCode: string,
+  metadata: Record<string, any>,
+  stack?: string,
+  statusCode?: number,
+  severity: "low" | "medium" | "high" | "critical" = "medium"
+) => {
+  try {
+    const { logError } = await import("./emailService.js");
+    await logError({
+      message,
+      source: "gemini-vision",
+      severity,
+      errorCode,
+      endpoint: "/workers/tag-generation",
+      method: "WORKER",
+      metadata,
+      stack,
+      statusCode,
+    });
+  } catch (logErr) {
+    console.error("Failed to log Gemini compliance error:", logErr);
+  }
+};
+
 /**
  * Build a category-specific detail prompt for PASS 2.
  * Each category gets tailored tagging instructions so Gemini
@@ -142,13 +168,23 @@ function ensureCategoryTag(tags: string[], category: string): string[] {
  * Supports any marketplace item: clothing, electronics, books, rooms, collectibles, etc.
  */
 export const generateTagsFromImage = async (buffer: Buffer): Promise<string[]> => {
-  try {
-    // Validate API key
-    if (!process.env.GEMINI_API_KEY) {
-      console.warn("[WARN] GEMINI_API_KEY not found, skipping tag generation");
-      return [];
-    }
+  if (!process.env.GEMINI_API_KEY) {
+    const missingKeyError = new Error("GEMINI_API_KEY is not configured");
+    console.error("[ERROR] Gemini Vision Configuration Error:", missingKeyError.message);
 
+    await logGeminiVisionError(
+      "Gemini Vision Configuration Error: GEMINI_API_KEY is missing",
+      "GEMINI_API_KEY_MISSING",
+      { bufferSize: buffer.length },
+      missingKeyError.stack,
+      undefined,
+      "high"
+    );
+
+    throw missingKeyError;
+  }
+
+  try {
     const model = getClient().getGenerativeModel({ model: "gemini-2.0-flash" });
 
     // Convert buffer to base64
@@ -315,9 +351,15 @@ If you truly cannot identify, respond with: unknown`;
     const fallbackPrompt = `The image shows a product in the "${category}" category.
 Return ONLY a JSON array of 5-10 short, lowercase tags describing this ${category}.
 Focus on attributes a buyer would search for. The first tag should be "${category}".
-No sentences, no apologies, no people-related terms. If unclear, return [].`;
+    No sentences, no apologies, no people-related terms. If unclear, return [].`;
 
     const fallback = await generate(fallbackPrompt);
+    if (fallback.tags.length === 0) {
+      const emptyResponseError = new Error(`Gemini returned no parsable tags for category "${category}"`);
+      (emptyResponseError as Error & { code?: string }).code = "GEMINI_EMPTY_RESPONSE";
+      throw emptyResponseError;
+    }
+
     const fallbackWithCategory = ensureCategoryTag(fallback.tags, category);
     console.log(
       `[WARN] Gemini fallback tags (${fallbackWithCategory.length}):`,
@@ -327,24 +369,19 @@ No sentences, no apologies, no people-related terms. If unclear, return [].`;
   } catch (error: any) {
     console.error("[ERROR] Gemini Vision API Error:", error);
 
-    // Log to compliance system
-    try {
-      const { logError } = await import("./emailService.js");
-      await logError({
-        message: `Gemini Vision API Error: ${error.message}`,
-        source: "gemini-vision",
-        severity: "medium",
-        errorCode: error.code || "GEMINI_API_ERROR",
-        metadata: {
-          details: error.details || error.toString(),
-          bufferSize: buffer.length,
-        },
-      });
-    } catch (logErr) {
-      console.error("Failed to log error:", logErr);
-    }
+    const errorCode = typeof error?.code === "string" ? error.code : "GEMINI_API_ERROR";
+    await logGeminiVisionError(
+      `Gemini Vision API Error: ${error?.message || String(error)}`,
+      errorCode,
+      {
+        details: error?.details || error?.toString?.() || String(error),
+        bufferSize: buffer.length,
+      },
+      error?.stack,
+      typeof error?.status === "number" ? error.status : undefined
+    );
 
-    return []; // Return empty array on failure
+    throw error;
   }
 };
 

@@ -16,6 +16,8 @@ const getErrorSource = (req: Request, error: Error): ErrorSource => {
   // Check error message for specific services
   if (errorMsg.includes("mongo") || errorMsg.includes("mongoose") || errorMsg.includes("validation")) return "mongodb";
   if (errorMsg.includes("cloudflare") || errorMsg.includes("r2") || errorMsg.includes("s3")) return "cloudflare";
+  if (errorMsg.includes("gemini")) return "gemini-vision";
+  if (errorMsg.includes("tag generation") || errorMsg.includes("image tagging")) return "feature";
   if (errorMsg.includes("vision") || errorMsg.includes("google") || errorMsg.includes("label")) return "google-vision";
   
   return "api";
