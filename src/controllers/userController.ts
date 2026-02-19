@@ -277,47 +277,111 @@ export const updateUserProfile = async (req: AuthRequest, res: Response) => {
       gstNumber,
       country,
       requireChatBeforePurchase,
+      cashOnDeliveryAvailable,
+      allIndiaDelivery,
+      freeShipping,
+      returnPolicy,
       autoReplyEnabled,
       autoReplyMessage,
       customQuickQuestion,
       inventoryAlertThreshold,
     } = req.body;
 
+    const existingUser = await User.findById(req.user._id).select("name userType companyName");
+    if (!existingUser || (existingUser as any).isDeleted) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const isBusinessUser = existingUser.userType === "business";
+    const resolvedName = (typeof name === "string" ? name : existingUser.name)?.trim();
+
     // Validate required fields
-    if (!name || !name.trim()) {
+    if (!resolvedName) {
       return res.status(400).json({ message: "Name is required" });
     }
 
-    if (req.user.userType === "business" && (!companyName || !companyName.trim())) {
+    const resolvedCompanyName = isBusinessUser
+      ? (typeof companyName === "string" ? companyName : existingUser.companyName || "").trim()
+      : "";
+
+    if (isBusinessUser && !resolvedCompanyName) {
       return res.status(400).json({ message: "Company Name is required for business users" });
     }
 
-    // Build update object
+    // Build update object (only overwrite optional fields when explicitly passed)
     const updateData: any = {
-      name: name.trim(),
-      bio: bio?.trim() || "",
-      location: location?.trim() || "",
-      showLocation: showLocation !== undefined ? showLocation : true, // ✅ Include showLocation toggle
-      profilePic: profilePic || "",
-      bannerImg: bannerImg || "",
-      nameLower: name.trim().toLowerCase(),
+      name: resolvedName,
+      nameLower: resolvedName.toLowerCase(),
     };
 
+    if (bio !== undefined) {
+      updateData.bio = typeof bio === "string" ? bio.trim() : "";
+    }
+    if (location !== undefined) {
+      updateData.location = typeof location === "string" ? location.trim() : "";
+    }
+    if (typeof showLocation === "boolean") {
+      updateData.showLocation = showLocation;
+    }
+    if (profilePic !== undefined) {
+      updateData.profilePic = typeof profilePic === "string" ? profilePic.trim() : "";
+    }
+    if (bannerImg !== undefined) {
+      updateData.bannerImg = typeof bannerImg === "string" ? bannerImg.trim() : "";
+    }
+
     // Add business fields if business user
-    if (req.user.userType === "business") {
-      updateData.companyName = companyName?.trim() || "";
-      updateData.companyNameLower = updateData.companyName.toLowerCase();
-      updateData.address = address?.trim() || "";
-      updateData.gstNumber = gstNumber?.trim() || "";
-      updateData.country = country?.trim() || "";
-      updateData.requireChatBeforePurchase = requireChatBeforePurchase !== false;
-      updateData.autoReplyEnabled = !!autoReplyEnabled;
-      updateData.autoReplyMessage = autoReplyMessage?.trim() || "Thanks for your message. We will reply soon.";
-      updateData.customQuickQuestion = customQuickQuestion?.trim() || "";
-      updateData.inventoryAlertThreshold =
-        inventoryAlertThreshold && Number(inventoryAlertThreshold) > 0
-          ? Number(inventoryAlertThreshold)
-          : 3;
+    if (isBusinessUser) {
+      updateData.companyName = resolvedCompanyName;
+      updateData.companyNameLower = resolvedCompanyName.toLowerCase();
+
+      if (address !== undefined) {
+        updateData.address = typeof address === "string" ? address.trim() : "";
+      }
+      if (gstNumber !== undefined) {
+        updateData.gstNumber = typeof gstNumber === "string" ? gstNumber.trim() : "";
+      }
+      if (country !== undefined) {
+        updateData.country = typeof country === "string" ? country.trim() : "";
+      }
+      if (typeof requireChatBeforePurchase === "boolean") {
+        updateData.requireChatBeforePurchase = requireChatBeforePurchase;
+      }
+      if (typeof cashOnDeliveryAvailable === "boolean") {
+        updateData.cashOnDeliveryAvailable = cashOnDeliveryAvailable;
+      }
+      if (typeof allIndiaDelivery === "boolean") {
+        updateData.allIndiaDelivery = allIndiaDelivery;
+      }
+      if (typeof freeShipping === "boolean") {
+        updateData.freeShipping = freeShipping;
+      }
+      if (returnPolicy !== undefined) {
+        const normalizedReturnPolicy = typeof returnPolicy === "string" ? returnPolicy.trim() : "";
+        const allowedReturnPolicies = new Set(["", "No returns", "7 days", "15 days", "30 days"]);
+        if (!allowedReturnPolicies.has(normalizedReturnPolicy)) {
+          return res.status(400).json({ message: "Invalid return policy value" });
+        }
+        updateData.returnPolicy = normalizedReturnPolicy;
+      }
+      if (typeof autoReplyEnabled === "boolean") {
+        updateData.autoReplyEnabled = autoReplyEnabled;
+      }
+      if (autoReplyMessage !== undefined) {
+        updateData.autoReplyMessage =
+          typeof autoReplyMessage === "string" && autoReplyMessage.trim().length > 0
+            ? autoReplyMessage.trim()
+            : "Thanks for your message. We will reply soon.";
+      }
+      if (customQuickQuestion !== undefined) {
+        updateData.customQuickQuestion =
+          typeof customQuickQuestion === "string" ? customQuickQuestion.trim() : "";
+      }
+      if (inventoryAlertThreshold !== undefined) {
+        const parsedThreshold = Number(inventoryAlertThreshold);
+        updateData.inventoryAlertThreshold =
+          Number.isFinite(parsedThreshold) && parsedThreshold > 0 ? parsedThreshold : 3;
+      }
     }
 
     // Update user
@@ -1078,3 +1142,4 @@ export const reportUser = async (req: AuthRequest, res: Response) => {
     res.status(500).json({ message: "Failed to report user" });
   }
 };
+
