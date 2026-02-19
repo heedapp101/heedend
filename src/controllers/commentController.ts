@@ -171,7 +171,11 @@ export const deleteComment = async (req: AuthRequest, res: Response) => {
     await Comment.deleteMany({ _id: { $in: idsToDelete } });
     await ImagePost.updateOne(
       { _id: comment.post },
-      { $inc: { commentsCount: -1 * idsToDelete.length }, $max: { commentsCount: 0 } }
+      { $inc: { commentsCount: -1 * idsToDelete.length } }
+    );
+    await ImagePost.updateOne(
+      { _id: comment.post, commentsCount: { $lt: 0 } },
+      { $set: { commentsCount: 0 } }
     );
     res.json({ message: "Deleted successfully", deletedCount: idsToDelete.length });
 
