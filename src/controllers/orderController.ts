@@ -114,59 +114,6 @@ const emitOrderChatMessage = (
   });
 };
 
-const sendPurchaseMessage = async (params: {
-  buyerId: Types.ObjectId;
-  sellerId: Types.ObjectId;
-  postId: Types.ObjectId;
-  title: string;
-  unitPrice: number;
-  image: string;
-  quantity: number;
-  remainingStock?: number | null;
-}) => {
-  try {
-    const chat = await getOrCreateOrderChat(params.buyerId, params.sellerId);
-    if (!chat) return null;
-
-    const typedChat = chat as any;
-    const stockSuffix =
-      typeof params.remainingStock === "number"
-        ? ` | Stock left: ${Math.max(0, params.remainingStock)}`
-        : "";
-    const content = `Order placed: ${params.quantity} x ${params.title}${stockSuffix}`;
-
-    const purchaseMessage: IMessage = {
-      _id: new Types.ObjectId(),
-      chat: typedChat._id,
-      sender: new Types.ObjectId(params.buyerId),
-      content,
-      messageType: "product",
-      product: {
-        postId: new Types.ObjectId(params.postId),
-        title: params.title,
-        price: params.unitPrice,
-        image: params.image,
-      },
-      isRead: false,
-      createdAt: new Date(),
-    } as IMessage;
-
-    const savedPurchaseMessage = await Message.create(purchaseMessage);
-    typedChat.lastMessage = {
-      content,
-      sender: new Types.ObjectId(params.buyerId),
-      createdAt: new Date(),
-    };
-    await typedChat.save();
-
-    emitOrderChatMessage(typedChat, params.buyerId.toString(), savedPurchaseMessage.toObject());
-    return typedChat;
-  } catch (error) {
-    console.error("Error sending purchase message:", error);
-    return null;
-  }
-};
-
 // Helper: Send dispute-window message (auto-deletes after 24 hours)
 const sendDisputeWindowMessage = async (
   senderId: Types.ObjectId,
@@ -531,25 +478,6 @@ export const createOrder = async (req: AuthRequest, res: Response) => {
           metadata: { postId: post._id.toString(), quantityAvailable: nextQuantity },
         });
       }
-    }
-
-    const remainingStock =
-      typeof (post as any).quantityAvailable === "number"
-        ? Number((post as any).quantityAvailable)
-        : null;
-    const purchaseChat = await sendPurchaseMessage({
-      buyerId: new Types.ObjectId(buyerId),
-      sellerId: new Types.ObjectId(seller._id),
-      postId: new Types.ObjectId(post._id),
-      title: post.title,
-      unitPrice: post.price || 0,
-      image: post.images[0]?.low || post.images[0]?.high || "",
-      quantity: parsedQuantity,
-      remainingStock,
-    });
-    if (purchaseChat && (!order.chatId || order.chatId.toString() !== purchaseChat._id.toString())) {
-      order.chatId = purchaseChat._id;
-      await order.save();
     }
 
     // Populate for response
