@@ -11,6 +11,63 @@ function getClient(): GoogleGenerativeAI {
   return genAI;
 }
 
+/**
+ * Custom error for rate limiting - tells BullMQ to wait longer before retry
+ */
+export class RateLimitError extends Error {
+  isRateLimit = true;
+  retryAfterMs: number;
+  
+  constructor(message: string, retryAfterMs = 60000) {
+    super(message);
+    this.name = "RateLimitError";
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+/**
+ * Check if an error is a rate limit error (429)
+ */
+function isRateLimitError(error: any): boolean {
+  if (error?.status === 429) return true;
+  if (error?.statusText === "Too Many Requests") return true;
+  const msg = error?.message?.toLowerCase() || "";
+  return msg.includes("429") || msg.includes("rate limit") || msg.includes("resource exhausted") || msg.includes("too many requests");
+}
+
+/**
+ * Simple circuit breaker to prevent hammering Gemini API when rate limited
+ */
+const circuitBreaker = {
+  isOpen: false,
+  lastError: 0,
+  cooldownMs: 120000, // 2 minutes cooldown after rate limit
+  
+  recordRateLimit() {
+    this.isOpen = true;
+    this.lastError = Date.now();
+    console.warn(`[CircuitBreaker] OPEN - Gemini API rate limited, cooling down for ${this.cooldownMs / 1000}s`);
+  },
+  
+  canProceed(): boolean {
+    if (!this.isOpen) return true;
+    
+    const elapsed = Date.now() - this.lastError;
+    if (elapsed >= this.cooldownMs) {
+      this.isOpen = false;
+      console.log("[CircuitBreaker] CLOSED - Cooldown complete, resuming requests");
+      return true;
+    }
+    
+    return false;
+  },
+  
+  getRemainingCooldown(): number {
+    if (!this.isOpen) return 0;
+    return Math.max(0, this.cooldownMs - (Date.now() - this.lastError));
+  }
+};
+
 const logGeminiVisionError = async (
   message: string,
   errorCode: string,
@@ -182,6 +239,16 @@ export const generateTagsFromImage = async (buffer: Buffer): Promise<string[]> =
     );
 
     throw missingKeyError;
+  }
+
+  // Check circuit breaker before making API call
+  if (!circuitBreaker.canProceed()) {
+    const remaining = circuitBreaker.getRemainingCooldown();
+    console.warn(`[CircuitBreaker] Request blocked - ${Math.ceil(remaining / 1000)}s remaining in cooldown`);
+    throw new RateLimitError(
+      `Gemini API in cooldown - ${Math.ceil(remaining / 1000)}s remaining`,
+      remaining
+    );
   }
 
   try {
@@ -369,8 +436,20 @@ Focus on attributes a buyer would search for. The first tag should be "${categor
   } catch (error: any) {
     console.error("[ERROR] Gemini Vision API Error:", error);
 
+    // Handle rate limit errors specially - throw RateLimitError for BullMQ to handle
+    if (isRateLimitError(error)) {
+      console.warn("[WARN] Gemini API rate limited - will retry with extended backoff");
+      // Record rate limit in circuit breaker
+      circuitBreaker.recordRateLimit();
+      throw new RateLimitError(
+        `Gemini API rate limited: ${error?.message || "429 Too Many Requests"}`,
+        circuitBreaker.cooldownMs // Use circuit breaker's cooldown
+      );
+    }
+
     const errorCode = typeof error?.code === "string" ? error.code : "GEMINI_API_ERROR";
-    await logGeminiVisionError(
+    // Don't await email logging - can cause timeouts and block the worker
+    logGeminiVisionError(
       `Gemini Vision API Error: ${error?.message || String(error)}`,
       errorCode,
       {
@@ -379,7 +458,7 @@ Focus on attributes a buyer would search for. The first tag should be "${categor
       },
       error?.stack,
       typeof error?.status === "number" ? error.status : undefined
-    );
+    ).catch((logErr) => console.error("Failed to log Gemini error:", logErr));
 
     throw error;
   }

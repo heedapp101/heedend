@@ -28,8 +28,11 @@ function getTagQueue(): Queue<TagQueueJob> {
     _tagQueue = new Queue<TagQueueJob>("tag-generation", {
       connection: getTagQueueConnection(),
       defaultJobOptions: {
-        attempts: 3,
-        backoff: { type: "exponential", delay: 5000 },
+        attempts: 5, // Increased from 3 for better resilience to Gemini rate limits
+        backoff: { 
+          type: "exponential", 
+          delay: 30000 // Start at 30 seconds instead of 5 (30s, 60s, 120s, 240s, 480s)
+        },
         removeOnComplete: 1000,
         removeOnFail: 100,
       },

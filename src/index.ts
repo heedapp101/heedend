@@ -67,38 +67,88 @@ initializeSocket(httpServer).catch((error) => {
 // ==========================================
 // ✅ UNCAUGHT EXCEPTION HANDLERS
 // ==========================================
+
+// Track consecutive errors to detect crash loops
+let consecutiveErrors = 0;
+const MAX_CONSECUTIVE_ERRORS = 5;
+const ERROR_RESET_INTERVAL = 60000; // Reset counter after 1 minute of stability
+
+// Reset error counter periodically if no issues
+setInterval(() => {
+  if (consecutiveErrors > 0) {
+    console.log(`[Stability] Resetting error counter (was ${consecutiveErrors})`);
+    consecutiveErrors = 0;
+  }
+}, ERROR_RESET_INTERVAL);
+
+// Check if error is transient and shouldn't cause exit
+const isTransientError = (error: Error | any): boolean => {
+  const msg = error?.message?.toLowerCase() || "";
+  const code = error?.code?.toLowerCase() || "";
+  
+  return (
+    msg.includes("rate limit") ||
+    msg.includes("429") ||
+    msg.includes("too many requests") ||
+    msg.includes("etimedout") ||
+    msg.includes("connection timeout") ||
+    msg.includes("econnreset") ||
+    msg.includes("socket hang up") ||
+    code === "etimedout" ||
+    code === "econnreset"
+  );
+};
+
 process.on("uncaughtException", async (error) => {
   console.error("❌ UNCAUGHT EXCEPTION:", error);
-  try {
-    const { logError } = await import("./utils/emailService.js");
-    await logError({
-      message: `Uncaught Exception: ${error.message}`,
-      source: "system",
-      severity: "critical",
-      errorCode: "UNCAUGHT_EXCEPTION",
-      stack: error.stack,
-    });
-  } catch (logErr) {
-    console.error("Failed to log uncaught exception:", logErr);
+  consecutiveErrors++;
+
+  // Don't exit for transient errors
+  if (isTransientError(error)) {
+    console.warn("⚠️ Transient error - NOT exiting process");
+    return;
   }
-  // Give time for logging before exit
-  setTimeout(() => process.exit(1), 1000);
+
+  // Try to log (fire and forget - don't await)
+  import("./utils/emailService.js")
+    .then(({ logError }) =>
+      logError({
+        message: `Uncaught Exception: ${error.message}`,
+        source: "system",
+        severity: "critical",
+        errorCode: "UNCAUGHT_EXCEPTION",
+        stack: error.stack,
+      })
+    )
+    .catch((logErr) => console.error("Failed to log uncaught exception:", logErr));
+
+  // Only exit if we've had too many consecutive errors (crash loop)
+  if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+    console.error(`❌ FATAL: ${MAX_CONSECUTIVE_ERRORS} consecutive errors - exiting`);
+    setTimeout(() => process.exit(1), 1000);
+  } else {
+    console.warn(`⚠️ Error ${consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS} - continuing...`);
+  }
 });
 
 process.on("unhandledRejection", async (reason, promise) => {
   console.error("❌ UNHANDLED REJECTION at:", promise, "reason:", reason);
-  try {
-    const { logError } = await import("./utils/emailService.js");
-    await logError({
-      message: `Unhandled Rejection: ${reason}`,
-      source: "system",
-      severity: "critical",
-      errorCode: "UNHANDLED_REJECTION",
-      stack: reason instanceof Error ? reason.stack : String(reason),
-    });
-  } catch (logErr) {
-    console.error("Failed to log unhandled rejection:", logErr);
-  }
+  
+  // Don't exit on unhandled rejections - just log them
+  // Most are transient network issues or rate limits
+  
+  // Fire and forget logging
+  import("./utils/emailService.js")
+    .then(({ logError }) =>
+      logError({
+        message: `Unhandled Rejection: ${reason}`,
+        source: "system",
+        severity: "high", // Downgraded from critical
+        errorCode: "UNHANDLED_REJECTION",
+        stack: reason instanceof Error ? reason.stack : String(reason),
+      })
+    )
+    .catch((logErr) => console.error("Failed to log unhandled rejection:", logErr));
 });
 
 // Connect to database (with retry logic)

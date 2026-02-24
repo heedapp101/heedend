@@ -1,6 +1,6 @@
 ﻿import { Worker, QueueEvents } from "bullmq";
 import ImagePost from "../models/ImagePost.js";
-import { generateTagsFromImage } from "../utils/geminiVision.js";
+import { generateTagsFromImage, RateLimitError } from "../utils/geminiVision.js";
 import { tagQueueConnection } from "../utils/tagQueue.js";
 import { logError } from "../utils/emailService.js";
 
@@ -57,33 +57,42 @@ export function initializeTagWorker() {
         const isFinalAttempt = attemptsMade >= attempts;
         const errorMessage = error?.message || String(error);
 
+        // Handle rate limit errors - delay retry for 2 minutes
+        if (error instanceof RateLimitError || error?.isRateLimit) {
+          console.warn(`[RATE LIMIT] Gemini rate limited for job ${job.id}, will retry in 2 minutes`);
+          // Set status to delayed (not failed) so it retries
+          await ImagePost.findByIdAndUpdate(postId, {
+            tagGenerationStatus: "processing", // Keep as processing, not failed
+            tagGenerationError: "Rate limited - will retry automatically",
+          });
+          // Don't log error emails for rate limits - they're expected
+          throw error; // BullMQ will handle retry with backoff
+        }
+
         if (isFinalAttempt) {
           await ImagePost.findByIdAndUpdate(postId, {
             tagGenerationStatus: "failed",
             tagGenerationError: errorMessage,
           });
 
-          try {
-            await logError({
-              message: `Image tagging failed for post ${postId}: ${errorMessage}`,
-              source: "feature",
-              severity: "medium",
-              errorCode: "IMAGE_TAGGING_FAILED",
-              endpoint: "/workers/tag-generation",
-              method: "WORKER",
-              metadata: {
-                feature: "image-tagging",
-                postId,
-                imageUrl,
-                queueJobId: job.id,
-                attemptsMade,
-                maxAttempts: attempts,
-              },
-              stack: error?.stack,
-            });
-          } catch (logErr) {
-            console.error("Failed to log image tagging failure:", logErr);
-          }
+          // Don't await email - fire and forget to prevent blocking
+          logError({
+            message: `Image tagging failed for post ${postId}: ${errorMessage}`,
+            source: "feature",
+            severity: "medium",
+            errorCode: "IMAGE_TAGGING_FAILED",
+            endpoint: "/workers/tag-generation",
+            method: "WORKER",
+            metadata: {
+              feature: "image-tagging",
+              postId,
+              imageUrl,
+              queueJobId: job.id,
+              attemptsMade,
+              maxAttempts: attempts,
+            },
+            stack: error?.stack,
+          }).catch((logErr) => console.error("Failed to log image tagging failure:", logErr));
         }
 
         throw error;
