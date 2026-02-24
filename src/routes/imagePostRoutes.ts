@@ -55,7 +55,9 @@ router.get("/recommended", recommendationLimiter, optionalAuth, getRecommendedPo
 router.get("/explore", getExplore);
 
 /* ---------- SMART FEED (Home Screen) ---------- */
+// GET for small requests, POST for larger exclude lists (like Instagram/TikTok)
 router.get("/feed", optionalAuth, getHomeFeed);
+router.post("/feed", optionalAuth, getHomeFeed);
 
 /* ---------- BOOST MANAGEMENT ---------- */
 router.get("/boost/status", requireAuth, getMyBoostStatus);    // Seller: Get my boost status

@@ -1421,150 +1421,152 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
   try {
     const page = parseInt(req.query.page as string) || 1;
     const limit = 12;
-    const skip = (page - 1) * limit;
     const now = new Date();
-    const twoDaysAgo = new Date(now.getTime() - 48 * 60 * 60 * 1000);
+    
+    // Parse excludeIds from query param or request body (for larger lists)
+    // This prevents showing duplicate content - like Instagram/TikTok
+    let excludeIds: mongoose.Types.ObjectId[] = [];
+    const excludeParam = req.query.exclude as string;
+    const bodyExcludeIds = (req.body as any)?.excludeIds;
+    
+    if (bodyExcludeIds && Array.isArray(bodyExcludeIds)) {
+      excludeIds = bodyExcludeIds
+        .filter((id: string) => mongoose.Types.ObjectId.isValid(id))
+        .map((id: string) => new mongoose.Types.ObjectId(id));
+    } else if (excludeParam) {
+      excludeIds = excludeParam
+        .split(',')
+        .filter(id => mongoose.Types.ObjectId.isValid(id))
+        .map(id => new mongoose.Types.ObjectId(id));
+    }
+    
+    // Limit excludeIds to prevent query from being too large (max 500)
+    if (excludeIds.length > 500) {
+      excludeIds = excludeIds.slice(-500); // Keep most recent
+    }
+    
     const withVisibility = (extra: Record<string, any> = {}) => {
       const match = { ...extra };
       applyVisibilityFilter(match);
+      // Always exclude already-seen posts
+      if (excludeIds.length > 0) {
+        match._id = { ...match._id, $nin: excludeIds };
+      }
       return match;
     };
 
-    // Get user interests and following list if logged in
+    // Get user interests for mild personalization weighting (not strict ordering)
     let userInterestTags: string[] = [];
-    let followingIds: mongoose.Types.ObjectId[] = [];
     
     if (req.user) {
       const User = (await import("../models/User.js")).default;
-      const [user, followDocs] = await Promise.all([
-        User.findById(req.user._id).select("interests").lean(),
-        Follow.find({ follower: req.user._id }).select("following").lean(),
-      ]);
+      const user = await User.findById(req.user._id).select("interests").lean();
 
       if (user?.interests && user.interests.length > 0) {
-        // Get top 10 interests sorted by score
         userInterestTags = user.interests
           .sort((a: any, b: any) => (b.score || 0) - (a.score || 0))
           .slice(0, 10)
           .map((i: any) => i.tag);
       }
-
-      if (followDocs && followDocs.length > 0) {
-        followingIds = followDocs.map((f: any) => f.following);
-      }
     }
 
-    // Parallel fetch different content streams
+    // Single random query with engagement-weighted scoring
+    // This is like Instagram's Explore - random but biased toward quality content
     const fetchPromises: Promise<any>[] = [
-      // 1. FOLLOWING: Posts from users you follow (priority - 3 per page)
-      followingIds.length > 0 ? ImagePost.aggregate([
-        { $match: withVisibility({ user: { $in: followingIds }, isBoosted: { $ne: true } }) },
-        { $sort: { createdAt: -1 } }, // Newest first from followed users
-        { $lookup: { from: "users", localField: "user", foreignField: "_id", as: "user" } },
-        { $unwind: "$user" },
-        { $match: { "user.isDeleted": { $ne: true } } }, // Filter deleted users
-        { $skip: skip },
-        { $limit: 3 },
-        { $project: { _id: 1, title: 1, description: 1, images: 1, tags: 1, views: 1, likesCount: 1, createdAt: 1, "user._id": 1, "user.username": 1, "user.name": 1, "user.companyName": 1, "user.userType": 1, "user.profilePic": 1 } }
-      ]) : Promise.resolve([]),
-
-      // 2. PERSONALIZED: Posts matching user interests (3 per page if user has interests) - exclude boosted
-      userInterestTags.length > 0 ? ImagePost.aggregate([
-        { $match: withVisibility({ tags: { $in: userInterestTags }, isBoosted: { $ne: true } }) },
+      // MAIN FEED: Random posts with engagement weighting (excludes already-seen)
+      ImagePost.aggregate([
+        { $match: withVisibility({ isBoosted: { $ne: true } }) },
+        // Sample more than needed, then we'll score and pick
+        { $sample: { size: limit * 3 } },
         {
           $addFields: {
-            relevanceScore: {
-              $size: { $setIntersection: [{ $ifNull: ["$tags", []] }, userInterestTags] }
-            },
+            // Engagement score for quality weighting
             engagementScore: {
               $add: [
                 { $multiply: [{ $ifNull: ["$likesCount", 0] }, 2] },
-                { $ifNull: ["$views", 0] }
-              ]
-            }
-          }
-        },
-        { $addFields: { combinedScore: { $add: [{ $multiply: ["$relevanceScore", 10] }, "$engagementScore"] } } },
-        { $sort: { combinedScore: -1, createdAt: -1 } },
-        { $lookup: { from: "users", localField: "user", foreignField: "_id", as: "user" } },
-        { $unwind: "$user" },
-        { $match: { "user.isDeleted": { $ne: true } } }, // Filter deleted users
-        { $skip: skip },
-        { $limit: 3 },
-        { $project: { _id: 1, title: 1, description: 1, images: 1, tags: 1, views: 1, likesCount: 1, createdAt: 1, "user._id": 1, "user.username": 1, "user.name": 1, "user.companyName": 1, "user.userType": 1, "user.profilePic": 1 } }
-      ]) : Promise.resolve([]),
-
-      // 3. TRENDING: High engagement posts (3 per page) - exclude boosted
-      ImagePost.aggregate([
-        { $match: withVisibility({ isBoosted: { $ne: true } }) },
-        {
-          $addFields: {
-            engagementScore: {
-              $add: [
-                { $multiply: [{ $ifNull: ["$likesCount", 0] }, 3] },
                 { $ifNull: ["$views", 0] },
-                { $multiply: [{ $ifNull: ["$commentsCount", 0] }, 2] }
+                { $multiply: [{ $ifNull: ["$commentsCount", 0] }, 3] }
+              ]
+            },
+            // Interest relevance (subtle boost, not filtering)
+            interestBoost: userInterestTags.length > 0 ? {
+              $multiply: [
+                { $size: { $setIntersection: [{ $ifNull: ["$tags", []] }, userInterestTags] } },
+                5
+              ]
+            } : 0,
+            // Recency bonus for fresh content
+            recencyBonus: {
+              $cond: [
+                { $gt: ["$createdAt", new Date(now.getTime() - 24 * 60 * 60 * 1000)] },
+                20,
+                0
               ]
             }
           }
         },
-        { $sort: { engagementScore: -1 } },
+        { $addFields: { 
+          totalScore: { 
+            $add: [
+              "$engagementScore", 
+              "$interestBoost", 
+              "$recencyBonus",
+              // Add randomness to prevent same ordering every time
+              { $multiply: [{ $rand: {} }, 30] }
+            ] 
+          } 
+        }},
+        { $sort: { totalScore: -1 } },
+        { $limit: limit },
         { $lookup: { from: "users", localField: "user", foreignField: "_id", as: "user" } },
         { $unwind: "$user" },
-        { $match: { "user.isDeleted": { $ne: true } } }, // Filter deleted users
-        { $skip: skip },
-        { $limit: 3 },
-        { $project: { _id: 1, title: 1, description: 1, images: 1, tags: 1, views: 1, likesCount: 1, createdAt: 1, "user._id": 1, "user.username": 1, "user.name": 1, "user.companyName": 1, "user.userType": 1, "user.profilePic": 1 } }
+        { $match: { "user.isDeleted": { $ne: true } } },
+        { $project: { 
+          _id: 1, title: 1, description: 1, images: 1, tags: 1, views: 1, 
+          likesCount: 1, createdAt: 1, 
+          "user._id": 1, "user.username": 1, "user.name": 1, 
+          "user.companyName": 1, "user.userType": 1, "user.profilePic": 1 
+        }}
       ]),
 
-      // 4. FRESH: New posts from last 48 hours (2 per page) - exclude boosted
-      ImagePost.find(withVisibility({ createdAt: { $gte: twoDaysAgo }, isBoosted: { $ne: true } }))
-        .populate("user", "username name companyName userType profilePic isDeleted")
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(2)
-        .lean()
-        .then((posts: any[]) => posts.filter((p: any) => !p.user?.isDeleted)),
-
-      // 5. BOOSTED: Seller promoted posts - 1 per page (industry standard like Instagram)
-      ImagePost.find(withVisibility({ isBoosted: true, boostExpiresAt: { $gt: now } }))
-        .populate("user", "username name companyName userType profilePic isDeleted")
-        .sort({ boostedAt: -1 })
-        .skip(page - 1) // Rotate through boosted posts across pages
-        .limit(1)
-        .lean()
-        .then((posts: any[]) => posts.filter((p: any) => !p.user?.isDeleted)),
-
-      // 6. RANDOM/FALLBACK: Ensures infinite scroll never ends - exclude boosted
-      // Uses $sample for true randomness (reshuffles automatically)
+      // BOOSTED: 1 random promoted post (respects excludeIds)
       ImagePost.aggregate([
-        { $match: withVisibility({ isBoosted: { $ne: true } }) },
-        { $sample: { size: 8 } }, // More random posts for variety
+        { $match: { 
+          ...withVisibility({ isBoosted: true, boostExpiresAt: { $gt: now } }),
+        }},
+        { $sample: { size: 1 } },
         { $lookup: { from: "users", localField: "user", foreignField: "_id", as: "user" } },
         { $unwind: "$user" },
-        { $match: { "user.isDeleted": { $ne: true } } }, // Filter deleted users
-        { $project: { _id: 1, title: 1, description: 1, images: 1, tags: 1, views: 1, likesCount: 1, createdAt: 1, "user._id": 1, "user.username": 1, "user.name": 1, "user.companyName": 1, "user.userType": 1, "user.profilePic": 1 } }
+        { $match: { "user.isDeleted": { $ne: true } } },
+        { $project: { 
+          _id: 1, title: 1, description: 1, images: 1, tags: 1, views: 1, 
+          likesCount: 1, createdAt: 1, isBoosted: 1,
+          "user._id": 1, "user.username": 1, "user.name": 1, 
+          "user.companyName": 1, "user.userType": 1, "user.profilePic": 1 
+        }}
       ]),
 
-      // 7. IN-FEED AD: 1 per page (standard frequency like Instagram/Facebook)
+      // IN-FEED AD: 1 per page
       Ad.aggregate([
         { $match: { type: "in-feed", isActive: true, startDate: { $lte: now }, endDate: { $gte: now }, "payment.status": "paid" } },
         { $sample: { size: 1 } }
       ]),
 
-      // 8. BANNER AD: Only on page 1
+      // BANNER AD: Only on page 1
       page === 1 ? Ad.aggregate([
         { $match: { type: "banner", isActive: true, startDate: { $lte: now }, endDate: { $gte: now }, "payment.status": "paid" } },
         { $sample: { size: 1 } }
       ]) : Promise.resolve([])
     ];
 
-    const [followingPosts, personalizedPosts, trendingPosts, freshPosts, boostedPosts, randomPosts, ads, bannerAd] = await Promise.all(fetchPromises);
+    const [mainPosts, boostedPosts, ads, bannerAd] = await Promise.all(fetchPromises);
 
     // Track boost views
-    const boostedIds = boostedPosts.map((p: any) => p._id);
-    if (boostedIds.length > 0) {
-      await ImagePost.updateMany({ _id: { $in: boostedIds } }, { $inc: { boostViews: 1 } });
+    if (boostedPosts.length > 0) {
+      await ImagePost.updateMany(
+        { _id: { $in: boostedPosts.map((p: any) => p._id) } }, 
+        { $inc: { boostViews: 1 } }
+      );
     }
 
     // Track ad impressions
@@ -1575,141 +1577,49 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
       await Ad.updateOne({ _id: bannerAd[0]._id }, { $inc: { impressions: 1 } });
     }
 
-    // SMART SHUFFLE: Interleave different content types for variety
-    const allPosts: any[] = [];
-    const seenIds = new Set<string>();
-
-    const addUnique = (posts: any[], source: string) => {
-      for (const post of posts) {
-        if (!post?._id) continue;
-        const id = post._id.toString();
-        if (!seenIds.has(id)) {
-          seenIds.add(id);
-          allPosts.push({ ...post, _source: source });
-        }
-      }
-    };
-
-    // NEW: Ensure freshest posts appear at top on page 1
-    const freshTop =
-      page === 1
-        ? [...freshPosts]
-            .sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-            .slice(0, 3)
-        : [];
-
-    if (freshTop.length > 0) {
-      addUnique(freshTop, "fresh");
+    // Shuffle the main posts for variety (Fisher-Yates)
+    const shuffledPosts = [...mainPosts];
+    for (let i = shuffledPosts.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffledPosts[i], shuffledPosts[j]] = [shuffledPosts[j], shuffledPosts[i]];
     }
 
-    // Interleave: Following first (priority!), then personalized, trending, fresh, random
-    // Boosted posts will be inserted naturally later
-    const maxLen = Math.max(
-      followingPosts.length,
-      personalizedPosts.length,
-      trendingPosts.length,
-      freshPosts.length,
-      randomPosts.length
-    );
-
-    for (let i = 0; i < maxLen; i++) {
-      // Following posts get priority - show first
-      if (followingPosts[i]) addUnique([followingPosts[i]], 'following');
-      if (personalizedPosts[i]) addUnique([personalizedPosts[i]], 'personalized');
-      if (trendingPosts[i]) addUnique([trendingPosts[i]], 'trending');
-      if (freshPosts[i]) addUnique([freshPosts[i]], 'fresh');
-      if (randomPosts[i]) addUnique([randomPosts[i]], 'random');
-    }
-
-    // FALLBACK: If we don't have enough posts, add more random ones
-    // This ensures infinite scroll NEVER ends
-    if (allPosts.length < limit) {
-      const additionalMatch = withVisibility({
-        _id: { $nin: Array.from(seenIds).map(id => new mongoose.Types.ObjectId(id)) },
-        isBoosted: { $ne: true }
-      });
-
-      const additionalRandom = await ImagePost.aggregate([
-        { $match: additionalMatch },
-        { $sample: { size: limit - allPosts.length + 3 } },
-        { $lookup: { from: "users", localField: "user", foreignField: "_id", as: "user" } },
-        { $unwind: "$user" },
-        { $match: { "user.isDeleted": { $ne: true } } }, // Filter deleted users
-        { $project: { _id: 1, title: 1, description: 1, images: 1, tags: 1, views: 1, likesCount: 1, createdAt: 1, "user._id": 1, "user.username": 1, "user.name": 1, "user.companyName": 1, "user.userType": 1, "user.profilePic": 1 } }
-      ]);
-      addUnique(additionalRandom, 'fallback');
-    }
-
-    // Limit to page size
-    let feedPosts = allPosts.slice(0, limit);
-
-    // SHUFFLE first few posts on page 1 (after fresh-top) for variety
-    if (page === 1 && feedPosts.length > 3) {
-      const fixedCount = freshTop.length;
-      const available = feedPosts.length - fixedCount;
-      const shuffleCount = Math.min(5, available);
-      if (shuffleCount > 1) {
-        const head = feedPosts.slice(0, fixedCount);
-        const toShuffle = feedPosts.slice(fixedCount, fixedCount + shuffleCount);
-        const rest = feedPosts.slice(fixedCount + shuffleCount);
-        // Fisher-Yates shuffle
-        for (let i = toShuffle.length - 1; i > 0; i--) {
-          const j = Math.floor(Math.random() * (i + 1));
-          [toShuffle[i], toShuffle[j]] = [toShuffle[j], toShuffle[i]];
-        }
-        feedPosts = [...head, ...toShuffle, ...rest];
-      }
-    }
-
-    // Format feed with likes count
-    const feed: any[] = feedPosts.map(post => ({
+    // Format feed
+    const feed: any[] = shuffledPosts.map(post => ({
       ...post,
       type: 'post',
       likes: post.likesCount || 0
     }));
 
-    // INSERT BOOSTED POSTS NATURALLY (like Instagram sponsored posts)
-    // - Only 1 boosted post per eligible page (less spammy)
-    // - Appear at truly random positions (changes on every refresh)
-    if (boostedPosts.length > 0) {
-      const boosted = boostedPosts[0]; // Only take first one
-      if (boosted?._id && !seenIds.has(boosted._id.toString())) {
-        // TRUE RANDOM position between 4-10 (not too early, not too late)
-        const minPos = 4;
-        const maxPos = Math.min(10, feed.length);
-        const insertPosition = Math.floor(Math.random() * (maxPos - minPos + 1)) + minPos;
-        
-        feed.splice(insertPosition, 0, {
-          ...boosted,
-          type: 'post',
-          isBoosted: true,
-          _source: 'boosted',
-          likes: boosted.likesCount || 0
-        });
-        
-        seenIds.add(boosted._id.toString());
-      }
+    // Insert boosted post at random position (3-8) if available
+    if (boostedPosts.length > 0 && boostedPosts[0]?._id) {
+      const boosted = boostedPosts[0];
+      const minPos = Math.min(3, feed.length);
+      const maxPos = Math.min(8, feed.length);
+      const insertPosition = Math.floor(Math.random() * (maxPos - minPos + 1)) + minPos;
+      
+      feed.splice(insertPosition, 0, {
+        ...boosted,
+        type: 'post',
+        isBoosted: true,
+        likes: boosted.likesCount || 0
+      });
     }
 
-    // Insert ad at RANDOM position (5-9) - every page, varied position
+    // Insert ad at random position (5-9) if available
     if (ads.length > 0 && ads[0].imageUrl) {
-      const minAdPos = 5;
+      const minAdPos = Math.min(5, feed.length);
       const maxAdPos = Math.min(9, feed.length);
       const adPosition = Math.floor(Math.random() * (maxAdPos - minAdPos + 1)) + minAdPos;
       feed.splice(adPosition, 0, { ...ads[0], type: 'ad' });
     }
 
-    // Remove internal fields
-    const finalFeed = feed.map(({ _source, ...rest }) => rest);
-
-    // TRULY INFINITE: Always return hasMore=true
-    // The $sample query ensures we get random posts even when user has scrolled through all
-    // This mimics TikTok/Instagram where you never hit "end of feed"
+    // Always return hasMore=true for infinite scroll (like TikTok/Instagram)
     res.json({
-      feed: finalFeed,
+      feed,
       banner: bannerAd[0] || null,
       page,
-      hasMore: true // ALWAYS true - infinite scroll forever
+      hasMore: true
     });
 
   } catch (err) {
