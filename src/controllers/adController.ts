@@ -432,7 +432,13 @@ export const getActiveAds = async (req: Request, res: Response) => {
       isActive: true,
       startDate: { $lte: now },
       endDate: { $gte: now },
-      "payment.status": "paid"
+      // Keep refunded ads hidden, but allow active pending ads so newly
+      // created admin campaigns can appear on discovery surfaces immediately.
+      $or: [
+        { "payment.status": "paid" },
+        { "payment.status": "pending" },
+        { "payment.status": { $exists: false } },
+      ],
     };
 
     if (type) query.type = type;
