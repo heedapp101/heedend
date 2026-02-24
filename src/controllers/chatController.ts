@@ -1289,17 +1289,17 @@ export const sendOfferPrice = async (req: AuthRequest, res: Response) => {
     }
 
     // Create offer message
-    const newMessage: IMessage = {
+    const newMessage = {
       _id: new Types.ObjectId(),
       chat: chat._id,
       sender: new Types.ObjectId(userId),
       content: messageContent,
-      messageType: "product",
+      messageType: "product" as const,
       product: offerProduct,
       inquiryId: inquiryId ? new Types.ObjectId(inquiryId) : chat.activeInquiryId,
       isRead: false,
       createdAt: new Date(),
-    } as IMessage;
+    };
 
     // Update last message preview
     let lastMessageContent = `Offer: Rs ${normalizedOfferPrice.toLocaleString("en-IN")}`;

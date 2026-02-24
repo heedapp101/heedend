@@ -217,6 +217,7 @@ interface SignupRequestBody {
   cashOnDeliveryAvailable?: boolean;
   allIndiaDelivery?: boolean;
   freeShipping?: boolean;
+  fixedShippingCharge?: number;
   returnPolicy?: string;
   requireChatBeforePurchase?: boolean;
   autoReplyEnabled?: boolean;
