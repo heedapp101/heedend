@@ -287,6 +287,7 @@ export const signup = async (
       cashOnDeliveryAvailable,
       allIndiaDelivery,
       freeShipping,
+      fixedShippingCharge,
       returnPolicy,
       requireChatBeforePurchase,
       autoReplyEnabled,
@@ -394,6 +395,9 @@ export const signup = async (
       cashOnDeliveryAvailable: userType === "business" ? cashOnDeliveryAvailable : false,
       allIndiaDelivery: userType === "business" ? allIndiaDelivery : false,
       freeShipping: userType === "business" ? freeShipping : false,
+      fixedShippingCharge: userType === "business" 
+        ? (fixedShippingCharge && Number(fixedShippingCharge) >= 0 ? Number(fixedShippingCharge) : 0) 
+        : 0,
       returnPolicy: userType === "business" ? returnPolicy : undefined,
       requireChatBeforePurchase: userType === "business" ? requireChatBeforePurchase !== false : true,
       autoReplyEnabled: userType === "business" ? !!autoReplyEnabled : false,

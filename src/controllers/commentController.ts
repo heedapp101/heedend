@@ -4,7 +4,7 @@ import ImagePost from "../models/ImagePost.js";
 import { AuthRequest } from "../middleware/authMiddleware.js";
 import { INTEREST_WEIGHTS } from "../utils/interestUtils.js";
 import { interestBuffer } from "../utils/InterestBuffer.js";
-import { notifyComment } from "../utils/notificationService.js";
+import { notifyComment, notifyCommentLike, notifyCommentReply } from "../utils/notificationService.js";
 
 // --- GET COMMENTS FOR A POST ---
 export const getComments = async (req: AuthRequest, res: Response) => {
@@ -105,6 +105,24 @@ export const addComment = async (req: AuthRequest, res: Response) => {
       );
     }
 
+    // 🔔 Send notification to parent comment author for replies (if different from current user)
+    if (parentId) {
+      const parentComment = await Comment.findById(parentId).populate("user", "_id");
+      if (parentComment && parentComment.user) {
+        const parentAuthorId = (parentComment.user as any)._id?.toString() || parentComment.user.toString();
+        if (parentAuthorId !== req.user._id.toString()) {
+          await notifyCommentReply(
+            parentAuthorId,
+            req.user._id.toString(),
+            req.user.name || req.user.username || "User",
+            postId,
+            newComment._id.toString(),
+            text
+          );
+        }
+      }
+    }
+
     // Populate user immediately for the UI
     await newComment.populate("user", "username name companyName userType profilePic isVerified");
 
@@ -195,6 +213,7 @@ export const toggleLikeComment = async (req: AuthRequest, res: Response) => {
 
     const userId = req.user._id;
     const index = comment.likes.indexOf(userId);
+    const wasLiked = index !== -1;
 
     if (index === -1) {
       comment.likes.push(userId); // Like
@@ -203,6 +222,25 @@ export const toggleLikeComment = async (req: AuthRequest, res: Response) => {
     }
 
     await comment.save();
+
+    // 🔔 Send notification when someone likes a comment (only on like, not unlike)
+    if (!wasLiked) {
+      const commentAuthorId = comment.user.toString();
+      if (commentAuthorId !== req.user._id.toString()) {
+        const commentWithUser = await Comment.findById(commentId).populate("user", "_id");
+        if (commentWithUser) {
+          await notifyCommentLike(
+            commentAuthorId,
+            req.user._id.toString(),
+            req.user.name || req.user.username || "User",
+            comment.post.toString(),
+            commentId,
+            comment.text || ""
+          );
+        }
+      }
+    }
+
     res.json({ likesCount: comment.likes.length, isLiked: index === -1 });
 
   } catch (err) {

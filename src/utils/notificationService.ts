@@ -111,6 +111,64 @@ export const notifyComment = async (
 };
 
 /**
+ * Create a COMMENT LIKE notification (when someone likes your comment)
+ */
+export const notifyCommentLike = async (
+  recipientId: string,
+  senderId: string,
+  senderName: string,
+  postId: string,
+  commentId: string,
+  commentText: string
+) => {
+  const truncatedComment = commentText.length > 30 
+    ? commentText.substring(0, 30) + "..." 
+    : commentText;
+    
+  // Create in-app notification
+  const notification = await createNotification({
+    recipientId,
+    senderId,
+    type: "comment_like",
+    title: "Comment Liked",
+    message: `${senderName} liked your comment: "${truncatedComment}"`,
+    postId,
+    commentId,
+  });
+
+  return notification;
+};
+
+/**
+ * Create a COMMENT REPLY notification (when someone replies to your comment)
+ */
+export const notifyCommentReply = async (
+  recipientId: string,
+  senderId: string,
+  senderName: string,
+  postId: string,
+  commentId: string,
+  replyText: string
+) => {
+  const truncatedReply = replyText.length > 50 
+    ? replyText.substring(0, 50) + "..." 
+    : replyText;
+    
+  // Create in-app notification
+  const notification = await createNotification({
+    recipientId,
+    senderId,
+    type: "comment_reply",
+    title: "Reply to Your Comment",
+    message: `${senderName} replied: "${truncatedReply}"`,
+    postId,
+    commentId,
+  });
+
+  return notification;
+};
+
+/**
  * Create a FOLLOW notification
  */
 export const notifyFollow = async (

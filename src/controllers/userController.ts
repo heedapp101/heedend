@@ -203,6 +203,17 @@ export const createCollection = async (req: AuthRequest, res: Response) => {
     if (!req.user) return res.status(401).json({ message: "Unauthorized" });
     const { name, isPrivate } = req.body;
 
+    // Check if collection with same name already exists for this user
+    const existingCollection = await Collection.findOne({ 
+      user: req.user._id, 
+      name: name 
+    });
+    
+    if (existingCollection) {
+      // Return existing collection instead of creating duplicate
+      return res.status(200).json(existingCollection);
+    }
+
     const newCollection = await Collection.create({
       user: req.user._id,
       name,
@@ -280,6 +291,7 @@ export const updateUserProfile = async (req: AuthRequest, res: Response) => {
       cashOnDeliveryAvailable,
       allIndiaDelivery,
       freeShipping,
+      fixedShippingCharge,
       returnPolicy,
       autoReplyEnabled,
       autoReplyMessage,
@@ -355,6 +367,12 @@ export const updateUserProfile = async (req: AuthRequest, res: Response) => {
       }
       if (typeof freeShipping === "boolean") {
         updateData.freeShipping = freeShipping;
+      }
+      if (fixedShippingCharge !== undefined) {
+        const parsedCharge = Number(fixedShippingCharge);
+        if (Number.isFinite(parsedCharge) && parsedCharge >= 0 && parsedCharge <= 10000) {
+          updateData.fixedShippingCharge = parsedCharge;
+        }
       }
       if (returnPolicy !== undefined) {
         const normalizedReturnPolicy = typeof returnPolicy === "string" ? returnPolicy.trim() : "";

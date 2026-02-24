@@ -1216,7 +1216,7 @@ export const getUnreadCount = async (req: AuthRequest, res: Response) => {
 export const sendOfferPrice = async (req: AuthRequest, res: Response) => {
   try {
     const { chatId } = req.params;
-    const { offerPrice, inquiryId, product } = req.body;
+    const { offerPrice, inquiryId, product, shippingCharge } = req.body;
     const userId = req.user?._id;
     const userType = req.user?.userType;
 
@@ -1228,6 +1228,12 @@ export const sendOfferPrice = async (req: AuthRequest, res: Response) => {
     const normalizedOfferPrice = Number(offerPrice);
     if (!Number.isFinite(normalizedOfferPrice) || normalizedOfferPrice <= 0) {
       return res.status(400).json({ message: "Valid offer price required" });
+    }
+
+    // Validate shipping charge if provided
+    const normalizedShippingCharge = shippingCharge ? Number(shippingCharge) : 0;
+    if (normalizedShippingCharge < 0 || normalizedShippingCharge > 10000) {
+      return res.status(400).json({ message: "Shipping charge must be between 0 and 10,000" });
     }
 
     if (!product || !product.postId || !product.title) {
@@ -1260,7 +1266,10 @@ export const sendOfferPrice = async (req: AuthRequest, res: Response) => {
       return res.status(403).json({ message: sendAccess.message || "Message request pending" });
     }
 
-    // Create offer product with new price
+    // Calculate total for customer
+    const totalForCustomer = normalizedOfferPrice + normalizedShippingCharge;
+
+    // Create offer product with new price and shipping
     const offerProduct = {
       postId: new Types.ObjectId(product.postId),
       title: product.title,
@@ -1270,22 +1279,35 @@ export const sendOfferPrice = async (req: AuthRequest, res: Response) => {
         typeof product.selectedSize === "string" && product.selectedSize.trim().length > 0
           ? product.selectedSize.trim()
           : undefined,
+      shippingCharge: normalizedShippingCharge > 0 ? normalizedShippingCharge : undefined,
     };
+
+    // Build message content with shipping info
+    let messageContent = `Offer price: Rs ${normalizedOfferPrice.toLocaleString("en-IN")}`;
+    if (normalizedShippingCharge > 0) {
+      messageContent += ` + Shipping: Rs ${normalizedShippingCharge.toLocaleString("en-IN")} = Total: Rs ${totalForCustomer.toLocaleString("en-IN")}`;
+    }
 
     // Create offer message
     const newMessage: IMessage = {
       _id: new Types.ObjectId(),
       chat: chat._id,
       sender: new Types.ObjectId(userId),
-      content: `Offer price: Rs ${normalizedOfferPrice.toLocaleString("en-IN")}`,
+      content: messageContent,
       messageType: "product",
       product: offerProduct,
       inquiryId: inquiryId ? new Types.ObjectId(inquiryId) : chat.activeInquiryId,
       isRead: false,
       createdAt: new Date(),
     } as IMessage;
+
+    // Update last message preview
+    let lastMessageContent = `Offer: Rs ${normalizedOfferPrice.toLocaleString("en-IN")}`;
+    if (normalizedShippingCharge > 0) {
+      lastMessageContent += ` + Rs ${normalizedShippingCharge} shipping`;
+    }
     chat.lastMessage = {
-      content: `Offer: Rs ${normalizedOfferPrice.toLocaleString("en-IN")}`,
+      content: lastMessageContent,
       sender: new Types.ObjectId(userId),
       createdAt: new Date(),
     };

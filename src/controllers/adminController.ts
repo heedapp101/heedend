@@ -622,7 +622,6 @@ export const getAwardCandidates = async (req: Request, res: Response) => {
         },
       },
       { $sort: { engagementScore: -1, createdAt: -1 } },
-      { $limit: limit },
       {
         $lookup: {
           from: "users",
@@ -632,6 +631,9 @@ export const getAwardCandidates = async (req: Request, res: Response) => {
         },
       },
       { $unwind: "$user" },
+      // Filter out posts from deleted users
+      { $match: { "user.isDeleted": { $ne: true } } },
+      { $limit: limit },
       {
         $project: {
           _id: 1,
@@ -1726,20 +1728,47 @@ export const getAwardedContent = async (req: Request, res: Response) => {
     const { limit = 4 } = req.query;
     const maxLimit = Math.min(Number(limit), 10);
 
-    // Get awarded posts that are visible
-    const awardedPosts = await ImagePost.find({
-      isAwarded: true,
-      awardStatus: "paid",
-      awardShowInFeed: true,
-      awardHidden: { $ne: true },
-      adminHidden: { $ne: true },
-      isArchived: { $ne: true },
-    })
-      .populate("user", "name username profilePic userType")
-      .select("_id title images awardMessage awardAmount awardedAt user")
-      .sort({ awardPriority: -1, awardedAt: -1 })
-      .limit(maxLimit)
-      .lean();
+    // Get awarded posts that are visible (use aggregate to filter deleted users)
+    const awardedPosts = await ImagePost.aggregate([
+      {
+        $match: {
+          isAwarded: true,
+          awardStatus: "paid",
+          awardShowInFeed: true,
+          awardHidden: { $ne: true },
+          adminHidden: { $ne: true },
+          isArchived: { $ne: true },
+        },
+      },
+      {
+        $lookup: {
+          from: "users",
+          localField: "user",
+          foreignField: "_id",
+          as: "user",
+        },
+      },
+      { $unwind: "$user" },
+      // Filter out posts from deleted users
+      { $match: { "user.isDeleted": { $ne: true } } },
+      { $sort: { awardPriority: -1, awardedAt: -1 } },
+      { $limit: maxLimit },
+      {
+        $project: {
+          _id: 1,
+          title: 1,
+          images: 1,
+          awardMessage: 1,
+          awardAmount: 1,
+          awardedAt: 1,
+          "user._id": 1,
+          "user.name": 1,
+          "user.username": 1,
+          "user.profilePic": 1,
+          "user.userType": 1,
+        },
+      },
+    ]);
 
     // Get awarded users that are visible
     const awardedUsers = await User.find({
@@ -1753,14 +1782,31 @@ export const getAwardedContent = async (req: Request, res: Response) => {
       .limit(maxLimit)
       .lean();
 
-    const totalAwardedPosts = await ImagePost.countDocuments({
-      isAwarded: true,
-      awardStatus: "paid",
-      awardShowInFeed: true,
-      awardHidden: { $ne: true },
-      adminHidden: { $ne: true },
-      isArchived: { $ne: true },
-    });
+    // Count total awarded posts (excluding those from deleted users)
+    const totalAwardedPostsResult = await ImagePost.aggregate([
+      {
+        $match: {
+          isAwarded: true,
+          awardStatus: "paid",
+          awardShowInFeed: true,
+          awardHidden: { $ne: true },
+          adminHidden: { $ne: true },
+          isArchived: { $ne: true },
+        },
+      },
+      {
+        $lookup: {
+          from: "users",
+          localField: "user",
+          foreignField: "_id",
+          as: "user",
+        },
+      },
+      { $unwind: "$user" },
+      { $match: { "user.isDeleted": { $ne: true } } },
+      { $count: "total" },
+    ]);
+    const totalAwardedPosts = totalAwardedPostsResult[0]?.total || 0;
 
     const totalAwardedUsers = await User.countDocuments({
       isAwarded: true,

@@ -1417,6 +1417,55 @@ export const getSellerAnalytics = async (req: AuthRequest, res: Response) => {
       .limit(5)
       .lean();
 
+    // ── 5. Customer analytics (repeated customers & customer list) ──
+    const customerAnalytics = await Order.aggregate([
+      {
+        $match: {
+          seller: sellerObjId,
+          status: { $nin: ["cancelled", "refunded"] },
+        },
+      },
+      {
+        $group: {
+          _id: "$buyer",
+          totalOrders: { $sum: 1 },
+          totalSpent: { $sum: "$totalAmount" },
+          firstOrder: { $min: "$createdAt" },
+          lastOrder: { $max: "$createdAt" },
+          avgOrderValue: { $avg: "$totalAmount" },
+        },
+      },
+      {
+        $lookup: {
+          from: "users",
+          localField: "_id",
+          foreignField: "_id",
+          as: "customerInfo",
+        },
+      },
+      { $unwind: "$customerInfo" },
+      {
+        $project: {
+          _id: 1,
+          totalOrders: 1,
+          totalSpent: 1,
+          firstOrder: 1,
+          lastOrder: 1,
+          avgOrderValue: 1,
+          "customerInfo.name": 1,
+          "customerInfo.username": 1,
+          "customerInfo.email": 1,
+          "customerInfo.profilePic": 1,
+          "customerInfo.phone": 1,
+        },
+      },
+      { $sort: { lastOrder: -1 } },
+    ]);
+
+    // Calculate repeated customers count and separate lists
+    const repeatedCustomers = customerAnalytics.filter((c: any) => c.totalOrders > 1);
+    const totalUniqueCustomers = customerAnalytics.length;
+
     // ── Format response ──
     const curr = currentPeriod;
     const currRevenue = curr.revenue[0]?.total || 0;
@@ -1487,6 +1536,40 @@ export const getSellerAnalytics = async (req: AuthRequest, res: Response) => {
         price: p.price,
       })),
       recentOrders: curr.recentOrders,
+      // Customer analytics
+      customerStats: {
+        totalUniqueCustomers,
+        repeatedCustomersCount: repeatedCustomers.length,
+        repeatRate: totalUniqueCustomers > 0 
+          ? Math.round((repeatedCustomers.length / totalUniqueCustomers) * 100) 
+          : 0,
+      },
+      repeatedCustomers: repeatedCustomers.slice(0, 10).map((c: any) => ({
+        id: c._id,
+        name: c.customerInfo.name,
+        username: c.customerInfo.username,
+        email: c.customerInfo.email,
+        phone: c.customerInfo.phone,
+        profilePic: c.customerInfo.profilePic,
+        totalOrders: c.totalOrders,
+        totalSpent: Math.round(c.totalSpent),
+        avgOrderValue: Math.round(c.avgOrderValue),
+        firstOrder: c.firstOrder,
+        lastOrder: c.lastOrder,
+      })),
+      allCustomers: customerAnalytics.slice(0, 20).map((c: any) => ({
+        id: c._id,
+        name: c.customerInfo.name,
+        username: c.customerInfo.username,
+        email: c.customerInfo.email,
+        phone: c.customerInfo.phone,
+        profilePic: c.customerInfo.profilePic,
+        totalOrders: c.totalOrders,
+        totalSpent: Math.round(c.totalSpent),
+        avgOrderValue: Math.round(c.avgOrderValue),
+        firstOrder: c.firstOrder,
+        lastOrder: c.lastOrder,
+      })),
     });
   } catch (error: any) {
     console.error("Get seller analytics error:", error);

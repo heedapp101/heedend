@@ -56,6 +56,7 @@ export interface IUser extends Document {
   cashOnDeliveryAvailable?: boolean;
   allIndiaDelivery?: boolean;
   freeShipping?: boolean;
+  fixedShippingCharge?: number; // Default shipping charge for non-negotiating customers
   returnPolicy?: string; // e.g., '7 days', '15 days', 'No returns'
 
   // --- Seller Payment Details ---
@@ -191,6 +192,7 @@ const userSchema = new Schema<IUser>(
     cashOnDeliveryAvailable: { type: Boolean, default: false },
     allIndiaDelivery: { type: Boolean, default: false },
     freeShipping: { type: Boolean, default: false },
+    fixedShippingCharge: { type: Number, min: 0, max: 10000, default: 0 },
     returnPolicy: { type: String, trim: true, default: '' },
 
     // Seller Payment Details (shared with buyers at checkout)

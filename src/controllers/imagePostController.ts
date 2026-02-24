@@ -334,9 +334,15 @@ export const getSinglePost = async (req: AuthRequest, res: Response) => {
     // First get the post to check if user already viewed
     let post = await ImagePost.findById(id).populate(
       "user",
-      "username userType name companyName profilePic requireChatBeforePurchase autoReplyEnabled autoReplyMessage customQuickQuestion inventoryAlertThreshold cashOnDeliveryAvailable"
+      "username userType name companyName profilePic requireChatBeforePurchase autoReplyEnabled autoReplyMessage customQuickQuestion inventoryAlertThreshold cashOnDeliveryAvailable isDeleted"
     );
     if (!post) return res.status(404).json({ message: "Not found" });
+
+    // Hide posts from deleted users from public access
+    const postUser = post.user as any;
+    if (postUser?.isDeleted) {
+      return res.status(404).json({ message: "Not found" });
+    }
 
     // Hide admin-hidden posts from public access
     const isAdmin = req.user?.userType === "admin";
@@ -367,7 +373,7 @@ export const getSinglePost = async (req: AuthRequest, res: Response) => {
       await ImagePost.updateOne({ _id: post._id }, { $inc: { views: 1 } });
       post = await ImagePost.findById(id).populate(
         "user",
-        "username userType name companyName profilePic requireChatBeforePurchase autoReplyEnabled autoReplyMessage customQuickQuestion inventoryAlertThreshold cashOnDeliveryAvailable"
+        "username userType name companyName profilePic requireChatBeforePurchase autoReplyEnabled autoReplyMessage customQuickQuestion inventoryAlertThreshold cashOnDeliveryAvailable isDeleted"
       ) as any;
     }
 
@@ -749,8 +755,6 @@ export const getTrendingPosts = async (req: Request, res: Response) => {
         },
       },
       { $sort: sortStage },
-      { $skip: skip },
-      { $limit: limit },
       {
         $lookup: {
           from: "users",
@@ -760,6 +764,10 @@ export const getTrendingPosts = async (req: Request, res: Response) => {
         },
       },
       { $unwind: "$user" },
+      // Filter out posts from deleted users
+      { $match: { "user.isDeleted": { $ne: true } } },
+      { $skip: skip },
+      { $limit: limit },
       {
         $project: {
           _id: 1,
@@ -931,8 +939,6 @@ export const getRecommendedPosts = async (req: AuthRequest, res: Response) => {
           },
         },
         { $sort: { finalScore: -1 } },
-        { $skip: skip },
-        { $limit: limit },
         {
           $lookup: {
             from: "users",
@@ -942,6 +948,10 @@ export const getRecommendedPosts = async (req: AuthRequest, res: Response) => {
           },
         },
         { $unwind: "$user" },
+        // Filter out posts from deleted users
+        { $match: { "user.isDeleted": { $ne: true } } },
+        { $skip: skip },
+        { $limit: limit },
         {
           $project: {
             _id: 1,
@@ -1006,8 +1016,6 @@ export const getRecommendedPosts = async (req: AuthRequest, res: Response) => {
           },
         },
         { $sort: { engagementScore: -1, createdAt: -1 } },
-        { $skip: skip },
-        { $limit: limit },
         {
           $lookup: {
             from: "users",
@@ -1017,6 +1025,10 @@ export const getRecommendedPosts = async (req: AuthRequest, res: Response) => {
           },
         },
         { $unwind: "$user" },
+        // Filter out posts from deleted users
+        { $match: { "user.isDeleted": { $ne: true } } },
+        { $skip: skip },
+        { $limit: limit },
         {
           $project: {
             _id: 1,
@@ -1141,12 +1153,15 @@ export const getRecommendedPosts = async (req: AuthRequest, res: Response) => {
     applyVisibilityFilter(finalMatch);
 
     const finalPosts = await ImagePost.find(finalMatch)
-      .populate("user", "username name companyName userType profilePic")
+      .populate("user", "username name companyName userType profilePic isDeleted")
       .lean();
+
+    // Filter out posts from deleted users
+    const filteredPosts = finalPosts.filter((post: any) => !post.user?.isDeleted);
 
     // Maintain the score order
     const finalPostMap = new Map(
-      finalPosts.map((post: any) => [post._id.toString(), post])
+      filteredPosts.map((post: any) => [post._id.toString(), post])
     );
     const orderedPosts = paginated
       .map((p) => finalPostMap.get(p._id.toString()))
@@ -1213,8 +1228,6 @@ export const getExplore = async (req: Request, res: Response) => {
           },
         },
         { $sort: { engagement: -1, createdAt: -1 } },
-        { $skip: skip },
-        { $limit: limit },
         {
           $lookup: {
             from: "users",
@@ -1224,6 +1237,10 @@ export const getExplore = async (req: Request, res: Response) => {
           },
         },
         { $unwind: "$user" },
+        // Filter out posts from deleted users
+        { $match: { "user.isDeleted": { $ne: true } } },
+        { $skip: skip },
+        { $limit: limit },
         {
           $project: {
             _id: 1,
@@ -1292,6 +1309,8 @@ export const getExplore = async (req: Request, res: Response) => {
           },
         },
         { $unwind: "$user" },
+        // Filter out posts from deleted users
+        { $match: { "user.isDeleted": { $ne: true } } },
         {
           $project: {
             _id: 1,
@@ -1330,6 +1349,8 @@ export const getExplore = async (req: Request, res: Response) => {
             },
           },
           { $unwind: "$user" },
+          // Filter out posts from deleted users
+          { $match: { "user.isDeleted": { $ne: true } } },
           {
             $project: {
               _id: 1,
@@ -1439,10 +1460,11 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
       followingIds.length > 0 ? ImagePost.aggregate([
         { $match: withVisibility({ user: { $in: followingIds }, isBoosted: { $ne: true } }) },
         { $sort: { createdAt: -1 } }, // Newest first from followed users
-        { $skip: skip },
-        { $limit: 3 },
         { $lookup: { from: "users", localField: "user", foreignField: "_id", as: "user" } },
         { $unwind: "$user" },
+        { $match: { "user.isDeleted": { $ne: true } } }, // Filter deleted users
+        { $skip: skip },
+        { $limit: 3 },
         { $project: { _id: 1, title: 1, description: 1, images: 1, tags: 1, views: 1, likesCount: 1, createdAt: 1, "user._id": 1, "user.username": 1, "user.name": 1, "user.companyName": 1, "user.userType": 1, "user.profilePic": 1 } }
       ]) : Promise.resolve([]),
 
@@ -1464,10 +1486,11 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
         },
         { $addFields: { combinedScore: { $add: [{ $multiply: ["$relevanceScore", 10] }, "$engagementScore"] } } },
         { $sort: { combinedScore: -1, createdAt: -1 } },
-        { $skip: skip },
-        { $limit: 3 },
         { $lookup: { from: "users", localField: "user", foreignField: "_id", as: "user" } },
         { $unwind: "$user" },
+        { $match: { "user.isDeleted": { $ne: true } } }, // Filter deleted users
+        { $skip: skip },
+        { $limit: 3 },
         { $project: { _id: 1, title: 1, description: 1, images: 1, tags: 1, views: 1, likesCount: 1, createdAt: 1, "user._id": 1, "user.username": 1, "user.name": 1, "user.companyName": 1, "user.userType": 1, "user.profilePic": 1 } }
       ]) : Promise.resolve([]),
 
@@ -1486,28 +1509,31 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
           }
         },
         { $sort: { engagementScore: -1 } },
-        { $skip: skip },
-        { $limit: 3 },
         { $lookup: { from: "users", localField: "user", foreignField: "_id", as: "user" } },
         { $unwind: "$user" },
+        { $match: { "user.isDeleted": { $ne: true } } }, // Filter deleted users
+        { $skip: skip },
+        { $limit: 3 },
         { $project: { _id: 1, title: 1, description: 1, images: 1, tags: 1, views: 1, likesCount: 1, createdAt: 1, "user._id": 1, "user.username": 1, "user.name": 1, "user.companyName": 1, "user.userType": 1, "user.profilePic": 1 } }
       ]),
 
       // 4. FRESH: New posts from last 48 hours (2 per page) - exclude boosted
       ImagePost.find(withVisibility({ createdAt: { $gte: twoDaysAgo }, isBoosted: { $ne: true } }))
-        .populate("user", "username name companyName userType profilePic")
+        .populate("user", "username name companyName userType profilePic isDeleted")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(2)
-        .lean(),
+        .lean()
+        .then((posts: any[]) => posts.filter((p: any) => !p.user?.isDeleted)),
 
       // 5. BOOSTED: Seller promoted posts - 1 per page (industry standard like Instagram)
       ImagePost.find(withVisibility({ isBoosted: true, boostExpiresAt: { $gt: now } }))
-        .populate("user", "username name companyName userType profilePic")
+        .populate("user", "username name companyName userType profilePic isDeleted")
         .sort({ boostedAt: -1 })
         .skip(page - 1) // Rotate through boosted posts across pages
         .limit(1)
-        .lean(),
+        .lean()
+        .then((posts: any[]) => posts.filter((p: any) => !p.user?.isDeleted)),
 
       // 6. RANDOM/FALLBACK: Ensures infinite scroll never ends - exclude boosted
       // Uses $sample for true randomness (reshuffles automatically)
@@ -1516,6 +1542,7 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
         { $sample: { size: 8 } }, // More random posts for variety
         { $lookup: { from: "users", localField: "user", foreignField: "_id", as: "user" } },
         { $unwind: "$user" },
+        { $match: { "user.isDeleted": { $ne: true } } }, // Filter deleted users
         { $project: { _id: 1, title: 1, description: 1, images: 1, tags: 1, views: 1, likesCount: 1, createdAt: 1, "user._id": 1, "user.username": 1, "user.name": 1, "user.companyName": 1, "user.userType": 1, "user.profilePic": 1 } }
       ]),
 
@@ -1607,6 +1634,7 @@ export const getHomeFeed = async (req: AuthRequest, res: Response) => {
         { $sample: { size: limit - allPosts.length + 3 } },
         { $lookup: { from: "users", localField: "user", foreignField: "_id", as: "user" } },
         { $unwind: "$user" },
+        { $match: { "user.isDeleted": { $ne: true } } }, // Filter deleted users
         { $project: { _id: 1, title: 1, description: 1, images: 1, tags: 1, views: 1, likesCount: 1, createdAt: 1, "user._id": 1, "user.username": 1, "user.name": 1, "user.companyName": 1, "user.userType": 1, "user.profilePic": 1 } }
       ]);
       addUnique(additionalRandom, 'fallback');
@@ -1948,6 +1976,8 @@ export const getSimilarPosts = async (req: Request, res: Response) => {
         },
       },
       { $unwind: "$user" },
+      // Filter out posts from deleted users
+      { $match: { "user.isDeleted": { $ne: true } } },
       {
         $project: {
           _id: 1,

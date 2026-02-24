@@ -250,7 +250,7 @@ export const searchAll = async (req: Request, res: Response) => {
             { $or: tagMatchConditions },
           ],
         })
-          .populate("user", "username userType profilePic name companyName isVerified")
+          .populate("user", "username userType profilePic name companyName isVerified isDeleted")
           .sort({ views: -1, createdAt: -1 })
           .skip(skip)
           .limit(postsLimit)
@@ -262,7 +262,7 @@ export const searchAll = async (req: Request, res: Response) => {
             { $and: [basePostFilter, { $text: { $search: query } }] },
             { score: { $meta: "textScore" } }
           )
-            .populate("user", "username userType profilePic name companyName isVerified")
+            .populate("user", "username userType profilePic name companyName isVerified isDeleted")
             .sort({ score: { $meta: "textScore" }, views: -1 })
             .skip(skip)
             .limit(postsLimit)
@@ -294,7 +294,7 @@ export const searchAll = async (req: Request, res: Response) => {
               },
             ],
           })
-            .populate("user", "username userType profilePic name companyName isVerified")
+            .populate("user", "username userType profilePic name companyName isVerified isDeleted")
             .sort({ views: -1, createdAt: -1 })
             .skip(skip)
             .limit(postsLimit)
@@ -320,7 +320,7 @@ export const searchAll = async (req: Request, res: Response) => {
               _id: { $nin: existingIds },
               tags: { $in: matchingTags },
             })
-              .populate("user", "username userType profilePic name companyName isVerified")
+              .populate("user", "username userType profilePic name companyName isVerified isDeleted")
               .sort({ views: -1, createdAt: -1 })
               .limit(remaining)
               .lean();
@@ -330,10 +330,12 @@ export const searchAll = async (req: Request, res: Response) => {
         }
       }
 
-      return posts.map((post) => ({
-        ...post,
-        likes: (post as any).likesCount || 0,
-      }));
+      return posts
+        .filter((post: any) => !post.user?.isDeleted) // Filter out posts from deleted users
+        .map((post) => ({
+          ...post,
+          likes: (post as any).likesCount || 0,
+        }));
     };
 
     // Smart similar: gather posts that share tags with matched posts
@@ -348,15 +350,17 @@ export const searchAll = async (req: Request, res: Response) => {
         _id: { $nin: matchedPostIds },
         tags: { $in: allTags },
       })
-        .populate("user", "username userType profilePic name companyName isVerified")
+        .populate("user", "username userType profilePic name companyName isVerified isDeleted")
         .sort({ views: -1, createdAt: -1 })
         .limit(10)
         .lean();
 
-      return similar.map((post) => ({
-        ...post,
-        likes: (post as any).likesCount || 0,
-      }));
+      return similar
+        .filter((post: any) => !post.user?.isDeleted) // Filter out posts from deleted users
+        .map((post) => ({
+          ...post,
+          likes: (post as any).likesCount || 0,
+        }));
     };
 
     const [users, posts, tags] = await Promise.all([

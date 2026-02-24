@@ -3,6 +3,8 @@ import mongoose, { Schema, Document } from "mongoose";
 export type NotificationType = 
   | "like"
   | "comment"
+  | "comment_like"
+  | "comment_reply"
   | "follow"
   | "award"
   | "order_placed"
@@ -55,6 +57,8 @@ const notificationSchema = new Schema<INotification>(
       enum: [
         "like", 
         "comment", 
+        "comment_like",
+        "comment_reply",
         "follow", 
         "award",
         "order_placed", 
