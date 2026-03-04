@@ -246,14 +246,23 @@ export async function sendOrderNotification(
   orderId: string,
   title: string,
   body: string,
-  type: 'order_placed' | 'order_confirmed' | 'order_shipped' | 'order_delivered' | 'order_cancelled'
+  type: 'order_placed' | 'order_confirmed' | 'order_shipped' | 'order_delivered' | 'order_cancelled',
+  context?: {
+    itemName?: string;
+    businessName?: string;
+  }
 ): Promise<void> {
+  const itemName = String(context?.itemName || '').trim();
+  const businessName = String(context?.businessName || '').trim();
+
   await sendPushNotificationToUser(recipientId, {
     title,
     body,
     data: {
       type,
       orderId,
+      ...(itemName ? { itemName } : {}),
+      ...(businessName ? { businessName } : {}),
     },
   });
 }

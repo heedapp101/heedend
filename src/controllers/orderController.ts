@@ -47,6 +47,29 @@ const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
   refunded: "Refunded",
 };
 
+const getBusinessDisplayName = (sellerLike: any): string => {
+  const companyName = String(sellerLike?.companyName || "").trim();
+  if (companyName) return companyName;
+
+  const name = String(sellerLike?.name || "").trim();
+  if (name) return name;
+
+  return String(sellerLike?.username || "").trim();
+};
+
+const buildOrderContextLabel = (
+  orderNumber: string,
+  itemName?: string,
+  businessName?: string
+): string => {
+  const normalizedItemName = String(itemName || "").trim();
+  const normalizedBusinessName = String(businessName || "").trim();
+  const orderRef = `Order #${orderNumber}`;
+  const itemRef = normalizedItemName ? `"${normalizedItemName}" (${orderRef})` : orderRef;
+
+  return normalizedBusinessName ? `${itemRef} from ${normalizedBusinessName}` : itemRef;
+};
+
 // Helper: Get or create chat between buyer and seller
 const getOrCreateOrderChat = async (
   buyerId: Types.ObjectId,
@@ -120,14 +143,15 @@ const sendDisputeWindowMessage = async (
   receiverId: Types.ObjectId,
   orderNumber: string,
   orderId: Types.ObjectId,
-  itemName?: string
+  itemName?: string,
+  businessName?: string
 ): Promise<void> => {
   try {
     const chat = await getOrCreateOrderChat(senderId, receiverId);
     if (!chat) return;
 
     const typedChat = chat as any;
-    const orderLabel = itemName ? `"${itemName}" (Order #${orderNumber})` : `Order #${orderNumber}`;
+    const orderLabel = buildOrderContextLabel(orderNumber, itemName, businessName);
     const content = `⚠️ If you have any issues with ${orderLabel}, you can raise a dispute within 24 hours.`;
 
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours from now
@@ -170,6 +194,7 @@ const sendOrderUpdateMessage = async (
     estimatedDelivery?: Date;
     isDeliveryConfirmation?: boolean;
     itemName?: string;
+    businessName?: string;
     note?: string;
   }
 ): Promise<void> => {
@@ -178,8 +203,11 @@ const sendOrderUpdateMessage = async (
     if (!chat) return;
 
     const typedChat = chat as any;
-    const productLabel = options?.itemName ? `"${options.itemName}"` : "";
-    const orderLabel = productLabel ? `${productLabel} (Order #${orderNumber})` : `Order #${orderNumber}`;
+    const orderLabel = buildOrderContextLabel(
+      orderNumber,
+      options?.itemName,
+      options?.businessName
+    );
 
     let content: string;
     let messageType: "order-update" | "delivery-confirmation" = "order-update";
@@ -485,6 +513,8 @@ export const createOrder = async (req: AuthRequest, res: Response) => {
       .populate("buyer", "username name phone profilePic")
       .populate("seller", "username name phone profilePic companyName")
       .populate("items.post", "title images price");
+    const itemLabelForNotification = String(orderItem?.title || post?.title || "").trim();
+    const businessNameForNotification = getBusinessDisplayName(seller);
 
     // 🔔 Send notification to seller about new order
     await notifyOrderStatus(
@@ -492,7 +522,11 @@ export const createOrder = async (req: AuthRequest, res: Response) => {
       order._id.toString(),
       orderNumber,
       "pending",
-      false // isBuyer = false (this goes to seller)
+      false, // isBuyer = false (this goes to seller)
+      {
+        itemName: itemLabelForNotification,
+        businessName: businessNameForNotification,
+      }
     );
 
     // 🔔 Send confirmation notification to buyer
@@ -502,7 +536,11 @@ export const createOrder = async (req: AuthRequest, res: Response) => {
         order._id.toString(),
         orderNumber,
         "pending",
-        true // isBuyer = true
+        true, // isBuyer = true
+        {
+          itemName: itemLabelForNotification,
+          businessName: businessNameForNotification,
+        }
       );
     }
 
@@ -1000,6 +1038,8 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
     // Send order update notification via chat
     const firstItemName = order.items?.[0]?.title || "";
     const itemLabel = order.items?.length > 1 ? `${firstItemName} +${order.items.length - 1} more` : firstItemName;
+    const sellerProfile = await User.findById(order.seller).select("companyName name username").lean();
+    const businessName = getBusinessDisplayName(sellerProfile);
     await sendOrderUpdateMessage(
       new mongoose.Types.ObjectId(sellerId),
       order.buyer,
@@ -1013,6 +1053,7 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
         estimatedDelivery: order.estimatedDelivery,
         isDeliveryConfirmation: status === "delivered" && previousStatus !== "disputed",
         itemName: itemLabel,
+        businessName,
         note:
           typeof note === "string" && note.trim().length > 0
             ? note.trim()
@@ -1027,7 +1068,8 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
         order.buyer,
         order.orderNumber,
         order._id,
-        itemLabel
+        itemLabel,
+        businessName
       );
     }
 
@@ -1037,7 +1079,11 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
       order._id.toString(),
       order.orderNumber,
       status,
-      true // isBuyer
+      true, // isBuyer
+      {
+        itemName: itemLabel,
+        businessName,
+      }
     );
 
     const populatedOrder = await Order.findById(orderId)

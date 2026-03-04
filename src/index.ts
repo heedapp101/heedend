@@ -27,6 +27,7 @@ import searchRoutes from "./routes/searchRoutes.js"; // ✅ SEARCH ROUTES
 import contactRoutes from "./routes/contactRoutes.js"; // ✅ CONTACT ROUTES
 import legalRoutes from "./routes/legalRoutes.js"; // ✅ LEGAL ROUTES
 import addressRoutes from "./routes/addressRoutes.js"; // ✅ ADDRESS ROUTES
+import offerRoutes from "./routes/offerRoutes.js"; // ✅ OFFER ROUTES
 
 // Error handling middleware
 import { errorHandler, notFoundHandler } from "./middleware/errorMiddleware.js";
@@ -233,6 +234,7 @@ app.use("/api/search", searchRoutes); // ✅ SEARCH ROUTES
 app.use("/api/contact", contactRoutes); // ✅ CONTACT ROUTES
 app.use("/api/legal", legalRoutes); // ✅ LEGAL ROUTES
 app.use("/api/addresses", addressRoutes); // ✅ SAVED ADDRESS ROUTES
+app.use("/api/offers", offerRoutes); // ✅ OFFER ROUTES
 
 // Health check endpoint
 app.get("/health", (req, res) => {

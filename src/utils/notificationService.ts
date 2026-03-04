@@ -201,52 +201,74 @@ export const notifyOrderStatus = async (
   orderId: string,
   orderNumber: string,
   status: string,
-  isBuyer: boolean = true
+  isBuyer: boolean = true,
+  options?: {
+    itemName?: string;
+    businessName?: string;
+  }
 ) => {
+  const itemName = String(options?.itemName || "").trim();
+  const businessName = String(options?.businessName || "").trim();
+  const orderRef = `Order #${orderNumber}`;
+  const orderWithItem = itemName ? `"${itemName}" (${orderRef})` : orderRef;
+  const buyerOrderLabel = businessName ? `${orderWithItem} from ${businessName}` : orderWithItem;
+
   const statusMessages: Record<string, { title: string; message: string }> = {
     pending: {
       title: "Order Placed",
       message: isBuyer 
-        ? `Your order #${orderNumber} has been placed successfully`
-        : `New order #${orderNumber} received`,
+        ? `Your order ${buyerOrderLabel} has been placed successfully`
+        : `New order ${orderWithItem} received`,
     },
     confirmed: {
       title: "Order Confirmed",
-      message: `Order #${orderNumber} has been confirmed by the seller`,
+      message: isBuyer
+        ? `Your order ${buyerOrderLabel} has been confirmed by the seller`
+        : `Order ${orderWithItem} has been confirmed`,
     },
     processing: {
       title: "Order Processing",
-      message: `Order #${orderNumber} is being prepared`,
+      message: isBuyer
+        ? `Your order ${buyerOrderLabel} is being prepared`
+        : `Order ${orderWithItem} is now processing`,
     },
     shipped: {
       title: "Order Shipped",
-      message: `Order #${orderNumber} has been shipped`,
+      message: isBuyer
+        ? `Your order ${buyerOrderLabel} has been shipped`
+        : `Order ${orderWithItem} has been shipped`,
     },
     out_for_delivery: {
       title: "Out for Delivery",
-      message: `Order #${orderNumber} is out for delivery`,
+      message: isBuyer
+        ? `Your order ${buyerOrderLabel} is out for delivery`
+        : `Order ${orderWithItem} is out for delivery`,
     },
     delivered: {
       title: "Order Delivered",
-      message: `Order #${orderNumber} has been delivered`,
+      message: isBuyer
+        ? `Your order ${buyerOrderLabel} has been delivered`
+        : `Order ${orderWithItem} has been delivered`,
     },
     cancelled: {
       title: "Order Cancelled",
-      message: `Order #${orderNumber} has been cancelled`,
+      message: isBuyer
+        ? `Your order ${buyerOrderLabel} has been cancelled`
+        : `Order ${orderWithItem} has been cancelled`,
     },
     refund_requested: {
       title: "Refund Requested",
-      message: `Refund requested for order #${orderNumber}`,
+      message: `Refund requested for ${orderWithItem}`,
     },
     refunded: {
       title: "Refund Processed",
-      message: `Refund processed for order #${orderNumber}`,
+      message: `Refund processed for ${orderWithItem}`,
     },
   };
 
   const { title, message } = statusMessages[status] || {
     title: "Order Update",
-    message: `Order #${orderNumber} status updated to ${status}`,
+    message: `${isBuyer ? "Your order" : "Order"} ${isBuyer ? buyerOrderLabel : orderWithItem} status updated to ${status}`,
   };
 
   const notifType = status === "pending" 
@@ -268,12 +290,15 @@ export const notifyOrderStatus = async (
     title,
     message,
     orderId,
-    metadata: { orderNumber, status },
+    metadata: { orderNumber, status, itemName, businessName },
   });
 
   // Send push notification for order updates
   if (['order_placed', 'order_confirmed', 'order_shipped', 'order_delivered', 'order_cancelled'].includes(notifType)) {
-    sendOrderNotification(recipientId, orderId, title, message, notifType as any).catch(err => 
+    sendOrderNotification(recipientId, orderId, title, message, notifType as any, {
+      itemName,
+      businessName,
+    }).catch(err => 
       console.error('Push notification error (order):', err)
     );
   }

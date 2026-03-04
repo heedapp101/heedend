@@ -1,12 +1,15 @@
 import { Request, Response } from "express";
+import mongoose from "mongoose";
 import User from "../models/User.js";
 import ImagePost from "../models/ImagePost.js";
+import Order from "../models/Order.js";
 import RecommendationAnalytics from "../models/RecommendationAnalytics.js";
 import Report from "../models/Report.js";
 import UserReport from "../models/UserReport.js";
 import { Award } from "../models/Award.js";
 import Notification from "../models/Notification.js";
 import { sendAwardChatMessage } from "../utils/awardChat.js";
+import { sendPushNotificationToUsers } from "../utils/pushNotifications.js";
 import crypto from "crypto";
 const signPrivateUrl = (url: string) => {
   // Only sign if it's a private URL
@@ -238,6 +241,228 @@ export const getAllUsers = async (req: Request, res: Response) => {
     res.status(200).json(signedUsers);
   } catch (error: any) {
     res.status(500).json({ message: error.message });
+  }
+};
+
+export const getUserPurchaseHistory = async (req: Request, res: Response) => {
+  try {
+    const { userId } = req.params;
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
+    const skip = (page - 1) * limit;
+
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({ message: "Invalid user id" });
+    }
+
+    const buyerObjectId = new mongoose.Types.ObjectId(userId);
+    const nonCancelledStatuses = [
+      "pending",
+      "confirmed",
+      "processing",
+      "shipping_initiated",
+      "shipped",
+      "out_for_delivery",
+      "delivered",
+      "disputed",
+      "refund_requested",
+    ];
+
+    const [user, totalOrders, orders, summaryRows, monthlyRows] = await Promise.all([
+      User.findById(userId).select("_id name username email profilePic userType isDeleted").lean(),
+      Order.countDocuments({ buyer: buyerObjectId }),
+      Order.find({ buyer: buyerObjectId })
+        .populate("seller", "_id name username companyName profilePic")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Order.aggregate([
+        { $match: { buyer: buyerObjectId } },
+        {
+          $group: {
+            _id: null,
+            grossSpent: { $sum: "$totalAmount" },
+            activeSpent: {
+              $sum: {
+                $cond: [{ $in: ["$status", nonCancelledStatuses] }, "$totalAmount", 0],
+              },
+            },
+            deliveredSpent: {
+              $sum: {
+                $cond: [{ $eq: ["$status", "delivered"] }, "$totalAmount", 0],
+              },
+            },
+            refundedAmount: {
+              $sum: {
+                $cond: [{ $eq: ["$status", "refunded"] }, "$totalAmount", 0],
+              },
+            },
+            deliveredOrders: {
+              $sum: {
+                $cond: [{ $eq: ["$status", "delivered"] }, 1, 0],
+              },
+            },
+            activeOrders: {
+              $sum: {
+                $cond: [{ $in: ["$status", nonCancelledStatuses] }, 1, 0],
+              },
+            },
+          },
+        },
+      ]),
+      Order.aggregate([
+        {
+          $match: {
+            buyer: buyerObjectId,
+            status: { $in: nonCancelledStatuses },
+          },
+        },
+        {
+          $group: {
+            _id: {
+              year: { $year: "$createdAt" },
+              month: { $month: "$createdAt" },
+            },
+            totalSpent: { $sum: "$totalAmount" },
+            ordersCount: { $sum: 1 },
+          },
+        },
+        { $sort: { "_id.year": -1, "_id.month": -1 } },
+        { $limit: 12 },
+      ]),
+    ]);
+
+    if (!user || (user as any).isDeleted) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const summary = summaryRows[0] || {
+      grossSpent: 0,
+      activeSpent: 0,
+      deliveredSpent: 0,
+      refundedAmount: 0,
+      deliveredOrders: 0,
+      activeOrders: 0,
+    };
+
+    const monthlySpend = monthlyRows.map((row: any) => ({
+      year: row?._id?.year,
+      month: row?._id?.month,
+      totalSpent: Number(row?.totalSpent || 0),
+      ordersCount: Number(row?.ordersCount || 0),
+    }));
+
+    res.status(200).json({
+      user,
+      summary: {
+        totalOrders,
+        grossSpent: Number(summary.grossSpent || 0),
+        totalSpent: Number(summary.activeSpent || 0),
+        deliveredSpent: Number(summary.deliveredSpent || 0),
+        refundedAmount: Number(summary.refundedAmount || 0),
+        deliveredOrders: Number(summary.deliveredOrders || 0),
+        activeOrders: Number(summary.activeOrders || 0),
+      },
+      orders,
+      monthlySpend,
+      pagination: {
+        page,
+        limit,
+        total: totalOrders,
+        pages: Math.ceil(totalOrders / limit),
+      },
+    });
+  } catch (error: any) {
+    console.error("Get user purchase history error:", error);
+    res.status(500).json({ message: error.message || "Failed to fetch purchase history" });
+  }
+};
+
+export const sendAdminPushNotification = async (req: Request, res: Response) => {
+  try {
+    const senderId = (req as any).user?._id;
+    const title = String(req.body?.title || "").trim();
+    const message = String(req.body?.message || "").trim();
+    const audience = String(req.body?.audience || "all").trim().toLowerCase();
+    const userIds = Array.isArray(req.body?.userIds) ? req.body.userIds : [];
+    const data = req.body?.data && typeof req.body.data === "object" ? req.body.data : {};
+
+    if (!title || !message) {
+      return res.status(400).json({ message: "Title and message are required" });
+    }
+
+    if (!["all", "selected"].includes(audience)) {
+      return res.status(400).json({ message: "Audience must be 'all' or 'selected'" });
+    }
+
+    const baseQuery: any = {
+      userType: { $ne: "admin" },
+      isDeleted: { $ne: true },
+    };
+
+    let recipients: string[] = [];
+
+    if (audience === "selected") {
+      const validIds = userIds
+        .map((id: any) => String(id).trim())
+        .filter((id: string) => mongoose.Types.ObjectId.isValid(id));
+
+      if (validIds.length === 0) {
+        return res.status(400).json({ message: "Select at least one valid user" });
+      }
+
+      const selectedUsers = await User.find({
+        ...baseQuery,
+        _id: { $in: validIds },
+      })
+        .select("_id")
+        .lean();
+      recipients = selectedUsers.map((user: any) => String(user._id));
+    } else {
+      const allUsers = await User.find(baseQuery).select("_id").lean();
+      recipients = allUsers.map((user: any) => String(user._id));
+    }
+
+    recipients = Array.from(new Set(recipients));
+    if (recipients.length === 0) {
+      return res.status(400).json({ message: "No recipients found for this selection" });
+    }
+
+    await Notification.insertMany(
+      recipients.map((recipientId) => ({
+        recipient: recipientId,
+        sender: senderId,
+        type: "system",
+        title,
+        message,
+        metadata: {
+          action: "admin_push",
+          audience,
+          ...data,
+        },
+      }))
+    );
+
+    sendPushNotificationToUsers(recipients, {
+      title,
+      body: message,
+      data: {
+        type: "admin_push",
+        audience,
+        ...data,
+      },
+    }).catch((pushErr) => console.error("Admin push notification send error:", pushErr));
+
+    res.status(200).json({
+      success: true,
+      audience,
+      sentCount: recipients.length,
+      message: "Push notification queued successfully",
+    });
+  } catch (error: any) {
+    console.error("Send admin push notification error:", error);
+    res.status(500).json({ message: error.message || "Failed to send push notification" });
   }
 };
 
