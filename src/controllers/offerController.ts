@@ -7,6 +7,7 @@ import User from "../models/User.js";
 import Notification from "../models/Notification.js";
 import { AuthRequest } from "../middleware/authMiddleware.js";
 import { sendPushNotificationToUser, sendPushNotificationToUsers } from "../utils/pushNotifications.js";
+import { processImage } from "../utils/ProcessImage.js";
 
 const EXCLUDED_ORDER_STATUSES = ["cancelled", "refunded"];
 
@@ -114,6 +115,16 @@ const isValidDate = (value: any) => {
   return !Number.isNaN(date.getTime());
 };
 
+const parseBooleanLike = (value: unknown, fallback = true) => {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true") return true;
+    if (normalized === "false") return false;
+  }
+  return fallback;
+};
+
 const parseOfferInput = (body: any) => {
   const title = String(body?.title || "").trim();
   const subtitle = String(body?.subtitle || "").trim();
@@ -128,7 +139,7 @@ const parseOfferInput = (body: any) => {
   const startDate = body?.startDate;
   const endDate = body?.endDate;
   const priority = Number(body?.priority);
-  const isActive = typeof body?.isActive === "boolean" ? body.isActive : true;
+  const isActive = parseBooleanLike(body?.isActive, true);
 
   return {
     title,
@@ -464,6 +475,7 @@ export const adminCreateOffer = async (req: AuthRequest, res: Response) => {
     }
 
     const payload = parseOfferInput(req.body);
+    const uploadFile = (req as any)?.file as Express.Multer.File | undefined;
 
     if (!payload.title || !payload.message) {
       return res.status(400).json({ message: "Title and message are required" });
@@ -495,8 +507,16 @@ export const adminCreateOffer = async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ message: "End date must be after start date" });
     }
 
+    let resolvedBannerImageUrl = payload.bannerImageUrl;
+    if (uploadFile?.buffer) {
+      const name = `offer-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const processed = await processImage(uploadFile.buffer, name);
+      resolvedBannerImageUrl = processed.high;
+    }
+
     const offer = await Offer.create({
       ...payload,
+      bannerImageUrl: resolvedBannerImageUrl,
       startDate,
       endDate,
       createdBy: req.user._id,
@@ -527,6 +547,7 @@ export const adminUpdateOffer = async (req: AuthRequest, res: Response) => {
     }
 
     const payload = parseOfferInput(req.body);
+    const uploadFile = (req as any)?.file as Express.Multer.File | undefined;
     const updates: any = { updatedBy: req.user._id };
 
     if (req.body?.title !== undefined) {
@@ -578,6 +599,12 @@ export const adminUpdateOffer = async (req: AuthRequest, res: Response) => {
     if (req.body?.endDate !== undefined) {
       if (!isValidDate(payload.endDate)) return res.status(400).json({ message: "Invalid end date" });
       updates.endDate = new Date(payload.endDate);
+    }
+
+    if (uploadFile?.buffer) {
+      const name = `offer-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const processed = await processImage(uploadFile.buffer, name);
+      updates.bannerImageUrl = processed.high;
     }
 
     const nextStartDate = updates.startDate || existing.startDate;

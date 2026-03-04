@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/authMiddleware.js";
 import { adminMiddleware } from "../middleware/roleMiddleware.js";
+import { upload } from "../middleware/upload.js";
 import {
   adminCreateOffer,
   adminGetOfferApplications,
@@ -23,8 +24,8 @@ router.get("/active", getActiveOffers);
 
 // Admin management
 router.get("/admin/list", requireAuth, adminMiddleware, adminListOffers);
-router.post("/admin", requireAuth, adminMiddleware, adminCreateOffer);
-router.put("/admin/:offerId", requireAuth, adminMiddleware, adminUpdateOffer);
+router.post("/admin", requireAuth, adminMiddleware, upload.single("image"), adminCreateOffer);
+router.put("/admin/:offerId", requireAuth, adminMiddleware, upload.single("image"), adminUpdateOffer);
 router.patch("/admin/:offerId/toggle", requireAuth, adminMiddleware, adminToggleOffer);
 router.get("/admin/:offerId/applications", requireAuth, adminMiddleware, adminGetOfferApplications);
 router.get(
